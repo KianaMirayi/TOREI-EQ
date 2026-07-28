@@ -1,0 +1,50 @@
+# Build
+build/
+cmake-build-*/
+out/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+.idea/
+*.iml
+
+# Compiled
+*.exe
+*.dll
+*.so
+*.dylib
+*.ilk
+*.pdb
+*.lib
+*.exp
+*.vst3
+*_artefacts/
+
+# JUCE
+JuceLibraryCode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# WebUI (generated)
+webui/index.html
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Test
+E:/AI Tools/ForHermesTest/
