@@ -64,9 +64,9 @@ ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& 
     addAndMakeVisible(webView.get());
     webView->goToURL("about:blank");
 
-    setSize(1500, 700);
+    setSize(1500, 1000);
     setResizable(true, true);
-    setResizeLimits(800, 500, 2200, 1500);
+    setResizeLimits(900, 600, 3000, 2000);
 }
 
 ToreiEQAudioProcessorEditor::~ToreiEQAudioProcessorEditor() {}
