@@ -1,6 +1,12 @@
 #pragma once
 #include <JuceHeader.h>
 
+// Minimal audio-receive confirmation: the audio thread only updates global atomic
+// level meters (no heap allocation, no member access through `this`, so it stays
+// safe even if the host calls processBlock after the processor is destroyed).
+float getAudioPeakDb();
+float getAudioRmsDb();
+
 class ToreiEQAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -28,6 +34,5 @@ public:
     void getStateInformation(juce::MemoryBlock&) override {}
     void setStateInformation(const void*, int) override {}
 
-private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToreiEQAudioProcessor)
 };

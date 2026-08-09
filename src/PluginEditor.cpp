@@ -36,10 +36,29 @@ ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& 
     : AudioProcessorEditor(&p)
     , processorRef(p)
 {
+    // Create the browser lazily on first visibility to avoid first-load crashes
+    // in hosts whose message loop is not yet stable during editor creation.
+    startTimerHz(21);
+
+    setSize(1500, 1000);
+    setResizable(true, true);
+    setResizeLimits(900, 600, 3000, 2000);
+}
+
+void ToreiEQAudioProcessorEditor::ensureWebView()
+{
+    if (webView)
+        return;
+
     auto winOpts = juce::WebBrowserComponent::Options::WinWebView2{};
-    winOpts = winOpts.withUserDataFolder(
-        juce::File::getSpecialLocation(juce::File::tempDirectory)
-            .getChildFile("TOREI_EQ_WebView2"));
+
+    // Persistent user-data folder so a cleaned temp directory does not reset the
+    // WebView2 runtime to a slow first-initialisation path.
+    const auto userDataDir = juce::File::getSpecialLocation(
+        juce::File::userApplicationDataDirectory).getChildFile("TOREI-EQ");
+    userDataDir.createDirectory();
+    winOpts = winOpts.withUserDataFolder(userDataDir.getChildFile("WebView2"));
+
     winOpts = winOpts.withStatusBarDisabled();
     winOpts = winOpts.withBuiltInErrorPageDisabled();
     winOpts = winOpts.withBackgroundColour(juce::Colour(0xff0b0c10));
@@ -59,17 +78,42 @@ ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& 
                 "document.write(atob('" + b64 + "')); document.close();");
     }
 
-    webView = std::make_unique<juce::WebBrowserComponent>(opts);
+    webView = std::make_unique<ToreiWebView>(opts);
+    webView->onPageLoaded = [this] { pageLoaded = true; };
     webView->setBounds(getLocalBounds());
     addAndMakeVisible(webView.get());
     webView->goToURL("about:blank");
-
-    setSize(1500, 1000);
-    setResizable(true, true);
-    setResizeLimits(900, 600, 3000, 2000);
 }
 
-ToreiEQAudioProcessorEditor::~ToreiEQAudioProcessorEditor() {}
+void ToreiEQAudioProcessorEditor::visibilityChanged()
+{
+    if (isVisible())
+        ensureWebView();
+
+    Component::visibilityChanged();
+}
+
+ToreiEQAudioProcessorEditor::~ToreiEQAudioProcessorEditor()
+{
+    if (webView)
+        webView->onPageLoaded = nullptr;
+
+    stopTimer();
+}
+
+void ToreiEQAudioProcessorEditor::timerCallback()
+{
+    ensureWebView();
+
+    if (!webView || !pageLoaded)
+        return;
+
+    // Push the real incoming audio level to the frontend meter.
+    juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+    obj->setProperty ("peak", getAudioPeakDb());
+    obj->setProperty ("rms",  getAudioRmsDb());
+    webView->emitEventIfBrowserIsVisible ("Audio_Level", obj.get());
+}
 
 void ToreiEQAudioProcessorEditor::resized()
 {

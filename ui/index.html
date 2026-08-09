@@ -19,7 +19,7 @@ var f2x=function(f){var mL=Math.log(20)/Math.LN10,ML=Math.log(20000)/Math.LN10;r
 var g2y=function(g){return 0.5-g/60};
 var x2f=function(x){return 20*Math.pow(10,x*3)};
 var y2g=function(y){return(0.5-y)*60};
-var SP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;
+var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;
 var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246","168,85,247","236,72,153"];
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
@@ -27,7 +27,10 @@ var GT=[24,18,12,6,0,-6,-12,-18,-24];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
 var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"Low Cut",highpass:"High Cut"};
 
-function genSpectrum(){var t=Date.now()*.05;for(var i=0;i<4096;i++){var f=(i/4095)*22050;SP[i]=Math.max(-120,Math.min(0,-22-3*Math.log2(Math.max(1,f/20))+10*Math.exp(-((f-400)*(f-400))/45000)+6*Math.exp(-((f-2500)*(f-2500))/320000)+(Math.random()-.5)*3+2*Math.sin(f*.0008+t)))}}
+function genSpectrum(){SP_LEN=4096;var t=Date.now()*.05;for(var i=0;i<4096;i++){var f=(i/4095)*22050;SP[i]=Math.max(-30,Math.min(0,-30-1.5*Math.log2(Math.max(1,f/20))+16*Math.exp(-((f-280)*(f-280))/36000)+9*Math.exp(-((f-2600)*(f-2600))/300000)+(Math.random()-.5)*3+2*Math.sin(f*.0006+t)))}}
+// 绑定 C++ 实时频谱（JUCE 插件内）。浏览器预览无 __JUCE__ 时走 mock。
+function bindSpectrumFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Spectrum_Data',function(data){var n=Math.min(data.length,SP.length);SP_LEN=n;for(var i=0;i<n;i++)SP[i]=data[i]||-120});return true}return false}
+function bindLevelFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Audio_Level',function(o){if(o&&typeof o.peak==='number'&&typeof o.rms==='number'){var p=peakRef;if(o.peak>p.hold){p.hold=o.peak;p.frames=60}else if(p.frames>0){p.frames--}else{p.hold=Math.max(o.peak,p.hold-.2)}p.peak=o.peak;p.rms=o.rms}});return true}return false}
 function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
@@ -258,19 +261,24 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     return function(){window.removeEventListener("keydown",kd);window.removeEventListener("keyup",ku)}
   },[store.sel]);
   useEffect(function(){if(!ctr.current)return;var o=new ResizeObserver(function(e){setDims({w:Math.floor(e[0].contentRect.width),h:Math.floor(e[0].contentRect.height)})});o.observe(ctr.current);return function(){o.disconnect()}},[]);
-  useEffect(function(){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}},[]);
+  useEffect(function(){var hasCpp=bindSpectrumFromCpp();bindLevelFromCpp();if(!hasCpp){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}}var rid2;var u=function(){rid2=requestAnimationFrame(u);if(!hasCpp)updatePeak()};rid2=requestAnimationFrame(u);return function(){cancelAnimationFrame(rid2)}},[]);
   useEffect(function(){if(dims.w<80)return;
   var ctx=cnv.current.getContext("2d"),dpr=window.devicePixelRatio||1;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
   var rid,draw=function(){rid=requestAnimationFrame(draw);
   var W=dims.w,H=dims.h,b=store.B,i;
   ctx.clearRect(0,0,W,H);
   for(i=0;i<FT.length;i++){var x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.strokeStyle="rgba(255,255,255,.04)";ctx.stroke()}
-  for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?"bold 10px monospace":"9px monospace";ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]])ctx.fillText(FL[FT[i]],x,H-6)}
-  for(i=0;i<GT.length;i++){var y=g2y(GT[i])*H;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.strokeStyle="rgba(255,255,255,.04)";ctx.stroke()}
-  ctx.beginPath();ctx.moveTo(0,g2y(0)*H);ctx.lineTo(W,g2y(0)*H);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();
-  var PC=W;ctx.fillStyle="rgba(255,229,185,.12)";ctx.beginPath();ctx.moveTo(0,H);
-  for(i=0;i<PC;i++){var f=20*Math.pow(10,(i/(PC-1))*3),bin=Math.floor(f/22050*4095);ctx.lineTo(i,g2y(Math.max(-90,SP[Math.min(4095,bin)]))*H)}ctx.lineTo(W,H);ctx.closePath();ctx.fill();
-  ctx.strokeStyle="rgba(255,229,185,.3)";ctx.lineWidth=1.5;ctx.stroke();
+  for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?"bold 10px monospace":"9px monospace";ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]]){var lx=Math.min(x,W-40);if(x>W-40)ctx.textAlign="right";ctx.fillText(FL[FT[i]],lx,H-6)}}
+  // 频谱区域横线 = ±30dB 对数刻度（全宽），GT 固定刻度已删除
+  var sp2y=function(d){d=Math.max(-30,Math.min(30,d));var s=d<0?-1:1;return 0.5-s*Math.log(1+Math.abs(d))/Math.log(31)*0.5};
+  var SPT=[-30,-24,-12,-6,-3,0,3,6,12,24,30];
+  for(i=0;i<SPT.length;i++){var sd=SPT[i],sy=sp2y(sd)*H;
+    if(sd===0){ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1}
+    else{ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(255,229,185,.07)";ctx.stroke()}
+    ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(sd===0?"0":(sd>0?"+"+sd:sd),W-28,sd===0?sy+8:sy)}
+  var SPW=W-34,PC=SPW;ctx.fillStyle="rgba(255,229,185,.06)";ctx.beginPath();ctx.moveTo(0,H);
+  for(i=0;i<PC;i++){var f=20*Math.pow(10,(i/(PC-1))*3),bin=Math.floor(f/22050*(SP_LEN-1));ctx.lineTo(i,sp2y(SP[Math.min(SP_LEN-1,bin)])*H)}ctx.lineTo(SPW,H);ctx.closePath();ctx.fill();
+  ctx.strokeStyle="rgba(255,229,185,.2)";ctx.lineWidth=1.2;ctx.stroke();
   if(CURVE_DIRTY)mockCurve(b,W);
   // Detect M/S split
   var split=false;

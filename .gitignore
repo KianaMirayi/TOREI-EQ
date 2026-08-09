@@ -1,7 +1,11 @@
 # Build
-build/
+build*/
+crashdumps/
 cmake-build-*/
 out/
+
+# Logs
+*.log
 
 # IDE
 .vs/

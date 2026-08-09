@@ -3,6 +3,7 @@ project(TOREI-EQ VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(JUCE_ROOT "E:/Programing/C++Hell/JUCE" CACHE PATH "JUCE root directory")
 add_subdirectory(${JUCE_ROOT} juce_build)
@@ -30,6 +31,11 @@ target_sources(TOREI-EQ PRIVATE
 
 target_include_directories(TOREI-EQ PRIVATE src)
 
+# MSVC: 源文件为 UTF-8（中文注释），强制按 UTF-8 解析，避免 GBK 误读吞行
+if(MSVC)
+    target_compile_options(TOREI-EQ PRIVATE /utf-8)
+endif()
+
 # === WebView2 ===
 set(WEBVIEW2_SDK "C:/Users/Admin/.nuget/packages/Microsoft.Web.WebView2/1.0.1901.177")
 target_include_directories(TOREI-EQ PRIVATE "${WEBVIEW2_SDK}/build/native/include")
@@ -42,16 +48,17 @@ target_compile_definitions(TOREI-EQ PUBLIC
 set(WEBVIEW2_DLL "${WEBVIEW2_SDK}/build/native/x64/WebView2Loader.dll")
 add_custom_command(TARGET TOREI-EQ POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WEBVIEW2_DLL}"
-        "$<TARGET_FILE_DIR:TOREI-EQ>/WebView2Loader.dll"
+        "$<TARGET_FILE_DIR:TOREI-EQ>/Standalone/WebView2Loader.dll"
 )
 add_custom_command(TARGET TOREI-EQ POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WEBVIEW2_DLL}"
-        "${CMAKE_BINARY_DIR}/TOREI-EQ_artefacts/Debug/Standalone/WebView2Loader.dll"
+        "$<TARGET_FILE_DIR:TOREI-EQ>/VST3/TOREI-EQ.vst3/Contents/x86_64-win/WebView2Loader.dll"
 )
 
 target_link_libraries(TOREI-EQ
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
