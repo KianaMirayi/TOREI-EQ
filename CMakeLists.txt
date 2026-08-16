@@ -27,6 +27,7 @@ juce_generate_juce_header(TOREI-EQ)
 target_sources(TOREI-EQ PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
+    src/SpectrumAnalyzer.cpp
 )
 
 target_include_directories(TOREI-EQ PRIVATE src)

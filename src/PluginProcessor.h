@@ -34,5 +34,12 @@ public:
     void getStateInformation(juce::MemoryBlock&) override {}
     void setStateInformation(const void*, int) override {}
 
+    // Spectrum smoothing tuning parameters (exposed to the host for live tweaking).
+    juce::AudioParameterFloat* spectrumAttack  = nullptr;  // 0.05..0.95
+    juce::AudioParameterFloat* spectrumRelease = nullptr;  // 0.10..0.98
+    juce::AudioParameterFloat* spectrumBlur    = nullptr;  // 0..5
+    juce::AudioParameterFloat* spectrumDilate  = nullptr;  // 0..3
+    juce::AudioParameterFloat* spectrumBand    = nullptr;  // 0.002..0.10 octave (band half-width)
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToreiEQAudioProcessor)
 };

@@ -7,6 +7,11 @@ out/
 # Logs
 *.log
 
+# Debug / temporary test artifacts
+build_log.txt
+spectrum_debug.txt
+spectrum_test.*
+
 # IDE
 .vs/
 .vscode/

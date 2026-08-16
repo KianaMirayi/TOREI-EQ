@@ -11,7 +11,7 @@
 |--------|------|---------|------|------|
 | `EQ_Curve_Data` | C++ → UI | `Float32Array` | 按需（视图变化时） | EQ 频率响应曲线极值点 |
 | `Phase_Curve_Data` | C++ → UI | `Float32Array` | 按需（视图变化时） | Phase Display 相位响应 |
-| `Spectrum_Data` | C++ → UI | `Float32Array` | ~21Hz | 实时频谱分析数据 |
+| `Spectrum_Data` | C++ → UI | `Float32Array` | ~40Hz | 实时频谱分析数据 |
 | `Peak_Level` | C++ → UI | `Float32` | ~86Hz（每帧） | 输出峰值电平 |
 | `Parameter_Change` | UI → C++ | `Float32Array` | 拖拽时 (≥1ms 节流) | 高频参数更新 |
 | `Command` | UI → C++ | JSON 字符串 | 低频 | 结构性指令（Undo/新建/删除等） |
@@ -73,22 +73,23 @@
 ## 3. `Spectrum_Data` — 实时频谱
 
 **方向**: C++ → UI  
-**触发**: 持续推送（~21Hz，约每 46ms 一次）  
-**格式**: `Float32Array`，长度 = 4096
+**触发**: 持续推送（~40Hz，约每 25ms 一次）  
+**格式**: `Float32Array`，长度 = 512（对数频率点）
 
 ```
-[bin0_dB, bin1_dB, bin2_dB, ..., bin4095_dB]
+[pt0_dB, pt1_dB, pt2_dB, ..., pt511_dB]
 ```
 
 | 字段 | 类型 | 范围 | 说明 |
 |------|------|------|------|
-| bin_dB | float32 | -120.0 ~ 0.0 | 该频率 bin 的 dBFS 幅值 |
+| pt_dB | float32 | -120.0 ~ 0.0 | 该对数频点的 dBFS 幅值（已平滑） |
 
 **约束**:
-- FFT size = 8192 → 4096 个正频率 bin
-- 线性频率间隔（bin 0 = 0Hz, bin 4095 = Nyquist）
-- 已通过 EMA 平滑（α ≈ 0.01，100ms 时间常数）
-- 已应用 Blackman-Harris 窗
+- 512 个点，**对数间隔**，point 0 = 20 Hz，point 511 = 20 kHz
+- 底层 FFT size = 4096，Blackman-Harris 窗 + 相干增益校准
+- **平滑在 C++ 侧完成**：分频带功率平均（频带半宽 `band`，低频不足 1 bin 时余弦插值）+ 弹道包络
+- 参数宿主可调：attack 0.50 / release 0.96 / blur 0 / dilate 0 / band 0.02（octave）
+- UI 只负责把 512 个点绘制成曲线（无需再采样/平滑）
 
 **休眠**: UI 不可见时 C++ 停止推送。恢复可见后从下一个 hop 继续。
 

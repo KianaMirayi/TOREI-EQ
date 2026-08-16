@@ -19,7 +19,7 @@ var f2x=function(f){var mL=Math.log(20)/Math.LN10,ML=Math.log(20000)/Math.LN10;r
 var g2y=function(g){return 0.5-g/60};
 var x2f=function(x){return 20*Math.pow(10,x*3)};
 var y2g=function(y){return(0.5-y)*60};
-var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;
+var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;
 var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246","168,85,247","236,72,153"];
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
@@ -27,7 +27,7 @@ var GT=[24,18,12,6,0,-6,-12,-18,-24];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
 var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"Low Cut",highpass:"High Cut"};
 
-function genSpectrum(){SP_LEN=4096;var t=Date.now()*.05;for(var i=0;i<4096;i++){var f=(i/4095)*22050;SP[i]=Math.max(-30,Math.min(0,-30-1.5*Math.log2(Math.max(1,f/20))+16*Math.exp(-((f-280)*(f-280))/36000)+9*Math.exp(-((f-2600)*(f-2600))/300000)+(Math.random()-.5)*3+2*Math.sin(f*.0006+t)))}}
+function genSpectrum(){SP_LEN=256;var t=Date.now()*.05;for(var i=0;i<256;i++){var f=20*Math.pow(10,(i/255)*3);SP[i]=Math.max(-120,Math.min(0,-120+85*Math.exp(-((f-280)*(f-280))/30000)+75*Math.exp(-((f-2800)*(f-2800))/1500000)+(Math.random()-.5)*3))}}
 // 绑定 C++ 实时频谱（JUCE 插件内）。浏览器预览无 __JUCE__ 时走 mock。
 function bindSpectrumFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Spectrum_Data',function(data){var n=Math.min(data.length,SP.length);SP_LEN=n;for(var i=0;i<n;i++)SP[i]=data[i]||-120});return true}return false}
 function bindLevelFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Audio_Level',function(o){if(o&&typeof o.peak==='number'&&typeof o.rms==='number'){var p=peakRef;if(o.peak>p.hold){p.hold=o.peak;p.frames=60}else if(p.frames>0){p.frames--}else{p.hold=Math.max(o.peak,p.hold-.2)}p.peak=o.peak;p.rms=o.rms}});return true}return false}
@@ -269,16 +269,33 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   ctx.clearRect(0,0,W,H);
   for(i=0;i<FT.length;i++){var x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.strokeStyle="rgba(255,255,255,.04)";ctx.stroke()}
   for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?"bold 10px monospace":"9px monospace";ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]]){var lx=Math.min(x,W-40);if(x>W-40)ctx.textAlign="right";ctx.fillText(FL[FT[i]],lx,H-6)}}
-  // 频谱区域横线 = ±30dB 对数刻度（全宽），GT 固定刻度已删除
-  var sp2y=function(d){d=Math.max(-30,Math.min(30,d));var s=d<0?-1:1;return 0.5-s*Math.log(1+Math.abs(d))/Math.log(31)*0.5};
-  var SPT=[-30,-24,-12,-6,-3,0,3,6,12,24,30];
+  // 左侧 EQ 增益刻度（±30，与右侧频谱 dBFS 空间对齐，Pro-Q 双刻度）
+  // g2y: 0 增益在中、+30 顶、-30 底；0 增益线橙色高亮为主要参考线
+  var GT=[30,18,12,6,0,-6,-12,-18,-24,-30];
+  for(i=0;i<GT.length;i++){var g=GT[i],gy=g2y(g)*H,ly=Math.max(6,Math.min(H-6,gy));
+    ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(6,gy);ctx.strokeStyle=g===0?"rgba(234,179,8,.7)":"rgba(255,255,255,.16)";ctx.lineWidth=g===0?1.5:1;ctx.stroke();
+    ctx.fillStyle=g===0?"rgba(234,179,8,.85)":"rgba(255,255,255,.42)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(g===0?"0":(g>0?"+"+g:String(g)),8,ly)}
+  // 频谱纵轴 = 0dBFS 顶 / -96dBFS 底（线性），宽量程让音乐的 -25~-65dB 频谱落在中上部，而非贴底
+  var sp2y=function(d){return Math.max(-96,Math.min(0,d))/(-96)};
+  var SPT=[0,-3,-6,-10,-15,-18,-24,-30,-36,-48,-60,-72,-84,-96];
   for(i=0;i<SPT.length;i++){var sd=SPT[i],sy=sp2y(sd)*H;
     if(sd===0){ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1}
     else{ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(255,229,185,.07)";ctx.stroke()}
-    ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(sd===0?"0":(sd>0?"+"+sd:sd),W-28,sd===0?sy+8:sy)}
-  var SPW=W-34,PC=SPW;ctx.fillStyle="rgba(255,229,185,.06)";ctx.beginPath();ctx.moveTo(0,H);
-  for(i=0;i<PC;i++){var f=20*Math.pow(10,(i/(PC-1))*3),bin=Math.floor(f/22050*(SP_LEN-1));ctx.lineTo(i,sp2y(SP[Math.min(SP_LEN-1,bin)])*H)}ctx.lineTo(SPW,H);ctx.closePath();ctx.fill();
-  ctx.strokeStyle="rgba(255,229,185,.2)";ctx.lineWidth=1.2;ctx.stroke();
+    ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(String(sd),W-28,sd===0?sy+8:sy)}
+  // 频谱：DSP 已输出 SP_LEN(=256) 个对数频率、已平滑的点，UI 直接绘制（二次贝塞尔柔化），不再采样/平滑
+  var SPW=W-34;
+  var sx=function(i){return i/(Math.max(1,SP_LEN-1))*SPW};
+  var sy=function(v){return sp2y(v)*H};
+  // 填充（底部闭合）
+  ctx.fillStyle="rgba(255,229,185,.13)";
+  ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,sy(SP[0]));
+  for(i=0;i<SP_LEN-1;i++){var x=sx(i),nx=sx(i+1),y=sy(SP[i]),ny=sy(SP[i+1]);ctx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}
+  ctx.lineTo(SPW,sy(SP[SP_LEN-1]));ctx.lineTo(SPW,H);ctx.closePath();ctx.fill();
+  // 顶部描边
+  ctx.strokeStyle="rgba(255,229,185,.38)";ctx.lineWidth=1.2;
+  ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
+  for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
+  ctx.lineTo(SPW,sy(SP[SP_LEN-1]));ctx.stroke();
   if(CURVE_DIRTY)mockCurve(b,W);
   // Detect M/S split
   var split=false;

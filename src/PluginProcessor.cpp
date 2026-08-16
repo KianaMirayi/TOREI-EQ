@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "SpectrumAnalyzer.h"
 
 #include <atomic>
 #include <cmath>
@@ -18,6 +19,18 @@ ToreiEQAudioProcessor::ToreiEQAudioProcessor()
         .withInput("Input", juce::AudioChannelSet::stereo(), true)
         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
+    // Spectrum smoothing tuning parameters.
+    spectrumAttack  = new juce::AudioParameterFloat ("spectrumAttack",  "Spectrum Attack",  0.05f,  0.95f, 0.50f);
+    spectrumRelease = new juce::AudioParameterFloat ("spectrumRelease", "Spectrum Release", 0.10f,  0.98f, 0.96f);
+    spectrumBlur    = new juce::AudioParameterFloat ("spectrumBlur",    "Spectrum Blur",    0.0f,   5.0f,  0.0f);
+    spectrumDilate  = new juce::AudioParameterFloat ("spectrumDilate",  "Spectrum Dilate",  0.0f,   3.0f,  0.0f);
+    spectrumBand    = new juce::AudioParameterFloat ("spectrumBand",    "Spectrum Band",    0.002f, 0.10f, 0.02f);
+
+    addParameter (spectrumAttack);
+    addParameter (spectrumRelease);
+    addParameter (spectrumBlur);
+    addParameter (spectrumDilate);
+    addParameter (spectrumBand);
 }
 
 ToreiEQAudioProcessor::~ToreiEQAudioProcessor() {}
@@ -25,9 +38,13 @@ ToreiEQAudioProcessor::~ToreiEQAudioProcessor() {}
 void ToreiEQAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused (sampleRate, samplesPerBlock);
+    prepareSpectrum (sampleRate, samplesPerBlock);
 }
 
-void ToreiEQAudioProcessor::releaseResources() {}
+void ToreiEQAudioProcessor::releaseResources()
+{
+    resetSpectrum();
+}
 
 void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
@@ -69,6 +86,11 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         update (gPeakDb, peakDb);
         update (gRmsDb,  rmsDb);
     }
+
+    // Feed the spectrum analyser (lock-free downmix + ring-buffer write).
+    pushAudioToSpectrum (buffer.getArrayOfReadPointers(),
+                         buffer.getNumChannels(),
+                         buffer.getNumSamples());
 
     // Passthrough.
 }

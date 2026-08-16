@@ -35,6 +35,9 @@ private:
     ToreiEQAudioProcessor& processorRef;
     std::unique_ptr<ToreiWebView> webView;
 
+    juce::HeapBlock<float> spectrumScratch;   // allocated lazily (kSpectrumBinCount)
+    juce::Array<juce::var> spectrumPayload;   // reused across frames
+
     bool pageLoaded = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToreiEQAudioProcessorEditor)

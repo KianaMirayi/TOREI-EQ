@@ -1,4 +1,7 @@
 #include "PluginEditor.h"
+#include "SpectrumAnalyzer.h"
+
+#include <cmath>
 
 static juce::File findWebUI()
 {
@@ -38,7 +41,7 @@ ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& 
 {
     // Create the browser lazily on first visibility to avoid first-load crashes
     // in hosts whose message loop is not yet stable during editor creation.
-    startTimerHz(21);
+    startTimerHz(40);
 
     setSize(1500, 1000);
     setResizable(true, true);
@@ -113,6 +116,34 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     obj->setProperty ("peak", getAudioPeakDb());
     obj->setProperty ("rms",  getAudioRmsDb());
     webView->emitEventIfBrowserIsVisible ("Audio_Level", obj.get());
+
+    // Apply the host-tunable smoothing parameters before computing the spectrum.
+    setSpectrumSmoothing (processorRef.spectrumAttack->get(),
+                          processorRef.spectrumRelease->get(),
+                          (int) std::lround (processorRef.spectrumBlur->get()),
+                          (int) std::lround (processorRef.spectrumDilate->get()),
+                          processorRef.spectrumBand->get());
+
+    // Push the smoothed log-spaced spectrum to the frontend (dBFS points).
+    if (spectrumScratch == nullptr)
+        spectrumScratch.calloc (kSpectrumPointCount);
+
+    const int points = readSpectrum (spectrumScratch.getData(), kSpectrumPointCount);
+
+    if (points > 0)
+    {
+        spectrumPayload.clearQuick();
+        spectrumPayload.ensureStorageAllocated (points);
+
+        for (int i = 0; i < points; ++i)
+        {
+            // Round to 0.1 dB to keep the JSON payload compact.
+            const float v = std::round (spectrumScratch[i] * 10.0f) * 0.1f;
+            spectrumPayload.add (juce::var ((double) v));
+        }
+
+        webView->emitEventIfBrowserIsVisible ("Spectrum_Data", spectrumPayload);
+    }
 }
 
 void ToreiEQAudioProcessorEditor::resized()
