@@ -87,6 +87,13 @@ namespace
             fifo.reset();
             rollFilled = 0;
             hasFrame = false;
+
+            // Destroy the FFT now rather than at process teardown. juce::dsp::FFT
+            // uses a LeakedObjectDetector, and gAnalyzer is a process-lifetime
+            // global, so holding the FFT until static teardown races JUCE's FFT
+            // leak-counter destructor and fires a spurious "leaked FFT" assert on
+            // close. prepare() recreates it on the next run.
+            fft.reset();
         }
 
         // Real-time safe: no allocation, no lock, bounded work.

@@ -31,12 +31,17 @@ public:
 private:
     void timerCallback() override;
     void ensureWebView();
+    void handleParameterChange (const juce::var& object);
+    void handleCommand (const juce::var& object);
 
     ToreiEQAudioProcessor& processorRef;
     std::unique_ptr<ToreiWebView> webView;
 
     juce::HeapBlock<float> spectrumScratch;   // allocated lazily (kSpectrumBinCount)
     juce::Array<juce::var> spectrumPayload;   // reused across frames
+
+    juce::HeapBlock<float> curveScratch;      // EqEngine::kCurvePoints floats
+    juce::Array<juce::var> curvePayload;      // reused across frames
 
     bool pageLoaded = false;
 

@@ -4,7 +4,7 @@
     <title>TOREI-EQ</title>
     <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body,#root{width:100%;height:100%;overflow:hidden;background:#0b0c10;color:#e2e8f0;font-family:"Inter","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;font-weight:500;user-select:none;-webkit-user-select:none;font-size:13px}
+html,body,#root{width:100%;height:100%;overflow:hidden;background:#0b0c10;color:#e2e8f0;font-family:"Inter","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;font-weight:500;-webkit-user-select:none;user-select:none;font-size:13px}
 input,select,textarea{font-family:inherit;font-size:inherit;font-weight:inherit}
 @keyframes tpanelin{from{opacity:0;transform:translate(-50%,20px) scale(.95)}to{opacity:1;transform:translate(-50%,0) scale(1)}}
 @keyframes tdropin{from{opacity:0;transform:translateY(10px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
@@ -13,32 +13,54 @@ input,select,textarea{font-family:inherit;font-size:inherit;font-weight:inherit}
 </style></head><body><div id="root"></div>
     <script src="react.js"></script><script src="react-dom.js"></script>
     <script>
+// Boot probe: if this arrives in eq_debug.txt as RECV UI_Log "ui-boot", the app
+// script parsed and ran, and the JS->C++ bridge works from the page. If it never
+// arrives, the whole app script failed to parse (or __JUCE__ is missing).
+(function(){try{sendDiag("UI_Log",{msg:"ui-boot",state:jsBridgeState()})}catch(e){}})();
+// Suppress the WebView2 default browser right-click context menu (unwanted in a
+// plugin editor). This is UI-only.
+(function(){try{document.addEventListener("contextmenu",function(e){e.preventDefault();return false})}catch(e){}})();
 var R=window.React,RD=window.ReactDOM,m=R.createElement;
 var useState=R.useState,useEffect=R.useEffect,useRef=R.useRef;
 var f2x=function(f){var mL=Math.log(20)/Math.LN10,ML=Math.log(20000)/Math.LN10;return(Math.log(Math.max(20,Math.min(20000,f)))/Math.LN10-mL)/(ML-mL)};
 var g2y=function(g){return 0.5-g/60};
 var x2f=function(x){return 20*Math.pow(10,x*3)};
 var y2g=function(y){return(0.5-y)*60};
-var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;
+var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;window.__EQCMDS=window.__EQCMDS||[];
 var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246","168,85,247","236,72,153"];
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
 var GT=[24,18,12,6,0,-6,-12,-18,-24];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
-var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"Low Cut",highpass:"High Cut"};
+var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"High Cut",highpass:"Low Cut"};
 
 function genSpectrum(){SP_LEN=256;var t=Date.now()*.05;for(var i=0;i<256;i++){var f=20*Math.pow(10,(i/255)*3);SP[i]=Math.max(-120,Math.min(0,-120+85*Math.exp(-((f-280)*(f-280))/30000)+75*Math.exp(-((f-2800)*(f-2800))/1500000)+(Math.random()-.5)*3))}}
 // 绑定 C++ 实时频谱（JUCE 插件内）。浏览器预览无 __JUCE__ 时走 mock。
 function bindSpectrumFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Spectrum_Data',function(data){var n=Math.min(data.length,SP.length);SP_LEN=n;for(var i=0;i<n;i++)SP[i]=data[i]||-120});return true}return false}
 function bindLevelFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Audio_Level',function(o){if(o&&typeof o.peak==='number'&&typeof o.rms==='number'){var p=peakRef;if(o.peak>p.hold){p.hold=o.peak;p.frames=60}else if(p.frames>0){p.frames--}else{p.hold=Math.max(o.peak,p.hold-.2)}p.peak=o.peak;p.rms=o.rms}});return true}return false}
+// UI -> C++：发送单个参数变动 / 结构指令（带错误上报，便于定位断链位置）
+function jsBridgeState(){try{var j=typeof window.__JUCE__;var b=(typeof window.__JUCE__!=='undefined'&&window.__JUCE__)?window.__JUCE__.backend:null;var c=typeof window.chrome;var w=(typeof window.chrome!=='undefined'&&window.chrome)?window.chrome.webview:null;return JSON.stringify({juce:j,backend:typeof b,emitEvent:(b&&typeof b.emitEvent)+'',chrome:c,webview:typeof w,postMessage:(w&&typeof w.postMessage)+''})}catch(e){return 'state-err:'+e.message}}
+function sendDiag(eventId,obj){try{if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.emitEvent(eventId,obj);return true}}catch(e){}try{if(window.chrome&&window.chrome.webview){window.chrome.webview.postMessage(JSON.stringify({eventId:eventId,payload:obj}));return true}}catch(e2){}return false}
+function sendParam(index,param,value){try{if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.emitEvent('Parameter_Change',{index:index,param:param,value:value})}}catch(e){}}
+function sendCmd(command,data){try{if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){var o={command:command};for(var k in data)o[k]=data[k];__JUCE__.backend.emitEvent('Command',o)}}catch(e){}}
+// Wait until the JUCE WebView2 bridge (window.__JUCE__.backend) is available, then
+// call cb(true). If it never becomes ready within ~10s, call cb(false). This keeps
+// the UI from dropping into simulated/mock mode just because the bridge is still
+// initialising, which is what previously made AddBand never reach the DSP.
+function bridgeReadyNow(){return typeof __JUCE__!=='undefined'&&__JUCE__&&__JUCE__.backend}
+function whenBridgeReady(cb){if(bridgeReadyNow()){cb(true);return}var tries=0;var iv=setInterval(function(){tries++;if(bridgeReadyNow()){clearInterval(iv);cb(true);return}if(tries>100){clearInterval(iv);cb(false)}},100)}
+// C++ -> UI：EQ 幅频响应曲线（dB，对数 20Hz..20kHz）
+var EQCURVE=new Float32Array(256);var EQCURVE_LEN=0;
+function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('EQ_Curve_Data',function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0});return true}return false}
+function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE2[j]=0}return}for(var j=0;j<W;j++){var pos=(j/(W-1))*(EQCURVE_LEN-1),i0=Math.floor(pos),i1=Math.min(EQCURVE_LEN-1,i0+1),t=pos-i0,v=EQCURVE[i0]*(1-t)+EQCURVE[i1]*t;CURVE[j]=v;CURVE2[j]=v}}
 function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
-  var B,setB,sel,setSel;var _r=useState([{id:"1",type:"peaking",freq:1000,gain:0,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"}]);B=_r[0];setB=_r[1];
+  var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"}]);B=_r[0];setB=_r[1];
   _r=useState(null);sel=_r[0];setSel=_r[1];
-  var update=function(id,chg){CURVE_DIRTY=true;setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,chg):b})})};
-  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var b={id:String(Date.now()+Math.random()),type:t,freq:f,gain:g,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"};setB(function(p){return p.concat([b])});setSel(b.id)};
-  var rem=function(id){CURVE_DIRTY=true;setB(function(p){return p.filter(function(b){return b.id!==id})});setSel(function(p){return p===id?null:p})};
+  var update=function(id,chg){CURVE_DIRTY=true;setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,chg):b})});for(var k in chg)sendParam(id,k,chg[k])};
+  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
+  var rem=function(id){CURVE_DIRTY=true;setB(function(p){return p.filter(function(b){return b.id!==id})});setSel(function(p){return p===id?null:p});sendCmd("RemoveBand",{index:id})};
   var toggle=function(id){update(id,{active:!B.find(function(b){return b.id===id}).active})};
   var toggleBypass=function(id){update(id,{bypass:!B.find(function(b){return b.id===id}).bypass})};
   return{B:B,sel:sel,selB:B.find(function(b){return b.id===sel})||null,setSel:setSel,update:update,add:add,remove:rem,toggle:toggle,toggleBypass:toggleBypass};
@@ -255,13 +277,18 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   useEffect(function(){return function(){if(tipTimer.current)clearTimeout(tipTimer.current)}},[]);
   useEffect(function(){var h=function(){setListenId(null)};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
   useEffect(function(){
-    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel)setListenId(store.sel)}};
+    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel!==null)setListenId(store.sel)}};
     var ku=function(e){if(e.key==="s"||e.key==="S")setListenId(null)};
     window.addEventListener("keydown",kd);window.addEventListener("keyup",ku);
     return function(){window.removeEventListener("keydown",kd);window.removeEventListener("keyup",ku)}
   },[store.sel]);
   useEffect(function(){if(!ctr.current)return;var o=new ResizeObserver(function(e){setDims({w:Math.floor(e[0].contentRect.width),h:Math.floor(e[0].contentRect.height)})});o.observe(ctr.current);return function(){o.disconnect()}},[]);
-  useEffect(function(){var hasCpp=bindSpectrumFromCpp();bindLevelFromCpp();if(!hasCpp){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}}var rid2;var u=function(){rid2=requestAnimationFrame(u);if(!hasCpp)updatePeak()};rid2=requestAnimationFrame(u);return function(){cancelAnimationFrame(rid2)}},[]);
+  useEffect(function(){whenBridgeReady(function(ok){
+    // Bind real C++ data first, and only fall back to the simulated spectrum if
+    // the bridge genuinely never came up.
+    var hasCpp=ok&&bindSpectrumFromCpp();
+    bindLevelFromCpp();bindCurveFromCpp();
+    if(!hasCpp){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}}var rid2;var u=function(){rid2=requestAnimationFrame(u);if(!hasCpp)updatePeak()};rid2=requestAnimationFrame(u);return function(){cancelAnimationFrame(rid2)}});},[]);
   useEffect(function(){if(dims.w<80)return;
   var ctx=cnv.current.getContext("2d"),dpr=window.devicePixelRatio||1;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
   var rid,draw=function(){rid=requestAnimationFrame(draw);
@@ -296,7 +323,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
   for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
   ctx.lineTo(SPW,sy(SP[SP_LEN-1]));ctx.stroke();
-  if(CURVE_DIRTY)mockCurve(b,W);
+  if(EQCURVE_LEN>0)applyEqCurve(W);else if(CURVE_DIRTY)mockCurve(b,W);
   // Detect M/S split
   var split=false;
   for(i=8;i<W;i+=8){if(Math.abs(g2y(CURVE[i])*H-g2y(CURVE2[i])*H)>Math.max(2,H*.008)){split=true;break}}
@@ -333,7 +360,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
       ctx.fillStyle=lc;ctx.fillText(lbl,lx,ly)}
     if(isSel){ctx.beginPath();ctx.arc(nx,ny,13,0,Math.PI*2);ctx.strokeStyle="rgba(255,255,255,.4)";ctx.lineWidth=1;ctx.stroke()}
   }
-  if(listenId){var lb=null,li=0;for(i=0;i<b.length;i++)if(b[i].id===listenId){lb=b[i];li=i}
+  if(listenId!==null){var lb=null,li=0;for(i=0;i<b.length;i++)if(b[i].id===listenId){lb=b[i];li=i}
     if(lb){var lbw=.6/Math.max(.1,lb.q||1),lf1=lb.freq/Math.pow(2,lbw),lf2=lb.freq*Math.pow(2,lbw),lx1=Math.max(0,f2x(lf1)*W),lx2=Math.min(W,f2x(lf2)*W);
     ctx.fillStyle="rgba(4,5,7,.62)";ctx.fillRect(0,0,lx1,H);ctx.fillRect(lx2,0,W-lx2,H);
     ctx.strokeStyle="rgba("+BC[li%8]+",.95)";ctx.lineWidth=1.5;ctx.shadowColor="rgba("+BC[li%8]+",.8)";ctx.shadowBlur=8;ctx.beginPath();ctx.moveTo(lx1,0);ctx.lineTo(lx1,H);ctx.moveTo(lx2,0);ctx.lineTo(lx2,H);ctx.stroke();ctx.shadowBlur=0}}
@@ -341,13 +368,13 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var hitTest=function(mx,my){for(var i=store.B.length-1;i>=0;i--){var b=store.B[i];if(!b.active||b.mute)continue;if(Math.hypot(mx-f2x(b.freq)*dims.w,my-g2y(b.gain)*dims.h)<14)return b}return null};
   var drag=useRef(null);
   var onPD=function(e){e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);setTip(t.id);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
-  var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov"))return;var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);setTip(null);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}if(nid){tipTimer.current=setTimeout(function(){setTip(nid)},600)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
+  var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov"))return;var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);setTip(null);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}if(nid!==null){tipTimer.current=setTimeout(function(){setTip(nid)},120)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
   var onPU=function(){drag.current=null;setActiveId(null)};
   var onPL=function(){setHoverId(null);setTip(null);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}};
   var onWheel=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){e.preventDefault();var s=e.shiftKey?1.01:1.05,nq=Math.max(.1,Math.min(40,t.q*(e.deltaY>0?s:1/s)));store.update(t.id,{q:+nq.toFixed(2)})}};
   var onDC=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t)store.update(t.id,{gain:0});else store.add(Math.round(x2f(mx/dims.w)),+y2g(my/dims.h).toFixed(1))};
-  var showTipId=tip||activeId,tipB=null,tipIdx=0,i2;
-  if(showTipId)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
+  var showTipId=tip!==null?tip:(activeId!==null?activeId:store.sel),tipB=null,tipIdx=0,i2;
+  if(showTipId!==null)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
   return m("div",{className:"flex-1",style:{display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
     m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onWheel:onWheel},
       m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
@@ -363,11 +390,21 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
 function App(){
   var store=useStore();
   var _po=useState({});var panelOffsets=_po[0],setPanelOffsets=_po[1];
+  var _bo=useState(false);var bridgeOffline=_bo[0],setBridgeOffline=_bo[1];
   var setPanelOffset=function(id,x){setPanelOffsets(function(prev){var n=Object.assign({},prev);n[id]=x;return n})};
   useEffect(function(){var h=function(e){if(e.key==="Delete"||e.key==="Backspace"){if(!e.repeat&&store.sel)store.remove(store.sel)}};window.addEventListener("keydown",h);return function(){window.removeEventListener("keydown",h)}},[store.sel]);
+  /** Wait for the DSP bridge, then declare the initial EQ bands. If the bridge
+      never becomes ready, flag the UI as offline (simulated data) so the user can
+      tell that the visible curve/spectrum are NOT coming from the DSP. */
+  /** Option A: declare the initial EQ bands by pushing them into the global command
+      queue (window.__EQCMDS). C++ polls that queue via evaluateJavascript, so this
+      does NOT depend on the fragile postMessage/emitEvent bridge. The UI_Ready
+      diagnostic is dropped (it relied on the broken emitEvent direction). */
+  useEffect(function(){try{for(var i=0;i<store.B.length;i++){var b=store.B[i];sendCmd("AddBand",{index:b.id,freq:b.freq,gain:b.gain,type:b.type,q:b.q})}}catch(e){};},[]);
   return m("div",{style:{width:"100%",height:"100%",display:"flex",flexDirection:"column"}},
     m("div",{style:{height:36,background:"#0d0f14",borderBottom:"1px solid rgba(255,255,255,.05)",display:"flex",alignItems:"center",padding:"0 12px",gap:8,fontSize:12}},
-      m("span",{style:{color:"#eab308",fontWeight:700,letterSpacing:1}},"TOREI-EQ"),m("span",{style:{color:"#555",fontSize:10}},"v1.0-dev")
+      m("span",{style:{color:"#eab308",fontWeight:700,letterSpacing:1}},"TOREI-EQ"),m("span",{style:{color:"#555",fontSize:10}},"v1.0-dev"),
+      bridgeOffline?m("span",{style:{marginLeft:10,padding:"2px 8px",background:"#7f1d1d",color:"#fecaca",borderRadius:4,fontSize:10,fontWeight:700}},"⚠ DSP OFFLINE — simulated data"):m("span")
     ),
     m(EQCanvas,{store:store,panelOffsets:panelOffsets,setPanelOffset:setPanelOffset}),
     m("div",{style:{height:44,background:"#111318",borderTop:"1px solid rgba(255,255,255,.05)",display:"flex",alignItems:"center",padding:"0 16px",gap:12,color:"#888",fontSize:11}},

@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "EqEngine.h"
 
 // Minimal audio-receive confirmation: the audio thread only updates global atomic
 // level meters (no heap allocation, no member access through `this`, so it stays
@@ -41,5 +42,12 @@ public:
     juce::AudioParameterFloat* spectrumDilate  = nullptr;  // 0..3
     juce::AudioParameterFloat* spectrumBand    = nullptr;  // 0.002..0.10 octave (band half-width)
 
+    // Static EQ engine (biquad bands), shared with the editor.
+    EqEngine& getEqEngine() { return eqEngine; }
+
+private:
+    EqEngine eqEngine;
+
+public:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ToreiEQAudioProcessor)
 };

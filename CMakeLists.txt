@@ -28,6 +28,7 @@ target_sources(TOREI-EQ PRIVATE
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
     src/SpectrumAnalyzer.cpp
+    src/EqEngine.cpp
 )
 
 target_include_directories(TOREI-EQ PRIVATE src)
@@ -43,6 +44,7 @@ target_include_directories(TOREI-EQ PRIVATE "${WEBVIEW2_SDK}/build/native/includ
 target_compile_definitions(TOREI-EQ PUBLIC
     JUCE_WEB_BROWSER=1
     JUCE_USE_WIN_WEBVIEW2=1
+    _CRT_SECURE_NO_WARNINGS=1
 )
 
 # === WebView2Loader.dll ===
