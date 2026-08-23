@@ -214,6 +214,14 @@ int EqEngine::getCurveGains (float* gains, int maxPoints) const
         gains[i] = (float) totalDb;
     }
 
+    // Light sliding average to remove the per-point jitter produced by summing
+    // many band magnitude responses. With a flat section this would otherwise
+    // surface as a small ripple once Catmull-Rom interpolation is applied in the
+    // UI. We fold it in on the C++ side so the data source is clean; the first and
+    // last points are left untouched so the curve endpoints stay exact.
+    for (int i = 1; i < n - 1; ++i)
+        gains[i] = (gains[i - 1] + gains[i] + gains[i + 1]) / 3.0f;
+
     return n;
 }
 

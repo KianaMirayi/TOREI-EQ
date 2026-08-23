@@ -26,7 +26,7 @@ var f2x=function(f){var mL=Math.log(20)/Math.LN10,ML=Math.log(20000)/Math.LN10;r
 var g2y=function(g){return 0.5-g/60};
 var x2f=function(x){return 20*Math.pow(10,x*3)};
 var y2g=function(y){return(0.5-y)*60};
-var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;window.__EQCMDS=window.__EQCMDS||[];
+var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var IPS=new Float32Array(4096);for(var _ipi=0;_ipi<4096;_ipi++)IPS[_ipi]=-120;var IPS_LEN=0;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;window.__EQCMDS=window.__EQCMDS||[];
 var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246","168,85,247","236,72,153"];
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
@@ -34,9 +34,15 @@ var GT=[24,18,12,6,0,-6,-12,-18,-24];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
 var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"High Cut",highpass:"Low Cut"};
 
-function genSpectrum(){SP_LEN=256;var t=Date.now()*.05;for(var i=0;i<256;i++){var f=20*Math.pow(10,(i/255)*3);SP[i]=Math.max(-120,Math.min(0,-120+85*Math.exp(-((f-280)*(f-280))/30000)+75*Math.exp(-((f-2800)*(f-2800))/1500000)+(Math.random()-.5)*3))}}
+function genSpectrum(){SP_LEN=256;IPS_LEN=256;var t=Date.now()*.05;for(var i=0;i<256;i++){var f=20*Math.pow(10,(i/255)*3);var base=Math.max(-120,Math.min(0,-120+85*Math.exp(-((f-280)*(f-280))/30000)+75*Math.exp(-((f-2800)*(f-2800))/1500000)+(Math.random()-.5)*3));IPS[i]=base;SP[i]=Math.max(-120,Math.min(0,base+24*Math.exp(-((f-1000)*(f-1000))/90000)))}}
 // 绑定 C++ 实时频谱（JUCE 插件内）。浏览器预览无 __JUCE__ 时走 mock。
-function bindSpectrumFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Spectrum_Data',function(data){var n=Math.min(data.length,SP.length);SP_LEN=n;for(var i=0;i<n;i++)SP[i]=data[i]||-120});return true}return false}
+// preEQ（输入）→ IPS；postEQ（输出）→ SP。两者同 512 log 点、同布局对齐。
+function bindSpectrumFromCpp(){
+  if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){
+    __JUCE__.backend.addEventListener('Spectrum_Data',function(data){var n=Math.min(data.length,IPS.length);IPS_LEN=n;for(var i=0;i<n;i++)IPS[i]=data[i]||-120});
+    __JUCE__.backend.addEventListener('Spectrum_Data_Post',function(data){var n=Math.min(data.length,SP.length);SP_LEN=n;for(var i=0;i<n;i++)SP[i]=data[i]||-120});
+    return true}
+  return false}
 function bindLevelFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('Audio_Level',function(o){if(o&&typeof o.peak==='number'&&typeof o.rms==='number'){var p=peakRef;if(o.peak>p.hold){p.hold=o.peak;p.frames=60}else if(p.frames>0){p.frames--}else{p.hold=Math.max(o.peak,p.hold-.2)}p.peak=o.peak;p.rms=o.rms}});return true}return false}
 // UI -> C++：发送单个参数变动 / 结构指令（带错误上报，便于定位断链位置）
 function jsBridgeState(){try{var j=typeof window.__JUCE__;var b=(typeof window.__JUCE__!=='undefined'&&window.__JUCE__)?window.__JUCE__.backend:null;var c=typeof window.chrome;var w=(typeof window.chrome!=='undefined'&&window.chrome)?window.chrome.webview:null;return JSON.stringify({juce:j,backend:typeof b,emitEvent:(b&&typeof b.emitEvent)+'',chrome:c,webview:typeof w,postMessage:(w&&typeof w.postMessage)+''})}catch(e){return 'state-err:'+e.message}}
@@ -50,9 +56,10 @@ function sendCmd(command,data){try{if(typeof __JUCE__!=='undefined'&&__JUCE__.ba
 function bridgeReadyNow(){return typeof __JUCE__!=='undefined'&&__JUCE__&&__JUCE__.backend}
 function whenBridgeReady(cb){if(bridgeReadyNow()){cb(true);return}var tries=0;var iv=setInterval(function(){tries++;if(bridgeReadyNow()){clearInterval(iv);cb(true);return}if(tries>100){clearInterval(iv);cb(false)}},100)}
 // C++ -> UI：EQ 幅频响应曲线（dB，对数 20Hz..20kHz）
-var EQCURVE=new Float32Array(256);var EQCURVE_LEN=0;
+var EQCURVE=new Float32Array(512);var EQCURVE_LEN=0;var SMEQ=new Float32Array(512);
 function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('EQ_Curve_Data',function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0});return true}return false}
-function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE2[j]=0}return}for(var j=0;j<W;j++){var pos=(j/(W-1))*(EQCURVE_LEN-1),i0=Math.floor(pos),i1=Math.min(EQCURVE_LEN-1,i0+1),t=pos-i0,v=EQCURVE[i0]*(1-t)+EQCURVE[i1]*t;CURVE[j]=v;CURVE2[j]=v}}
+function smoothCurve(a,n){if(n<5)return;var p2=a[0],p1=a[0],c=a[0];for(var i=1;i<n-1;i++){var nx1=a[i+1],nx2=(i<n-2)?a[i+2]:a[n-1];a[i]=(p2+4*p1+6*c+4*nx1+nx2)/16;p2=p1;p1=c;c=nx1}}
+function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE2[j]=0}return}var n=EQCURVE_LEN,E=EQCURVE;SMEQ[0]=E[0];SMEQ[n-1]=E[n-1];for(var i=1;i<n-1;i++){var a=E[i-1],b=E[i],c=E[i+1];if((b>=a&&b>=c)||(b<=a&&b<=c))SMEQ[i]=b;else SMEQ[i]=(a+b+c)/3}for(var j=0;j<W;j++){var pos=(j/(W-1))*(n-1),i0=Math.floor(pos),i1=Math.min(n-1,i0+1),t=pos-i0,p0=SMEQ[Math.max(0,i0-1)],p1=SMEQ[i0],p2=SMEQ[i1],p3=SMEQ[Math.min(n-1,i1+1)],t2=t*t,t3=t2*t,v=.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);CURVE[j]=v;CURVE2[j]=v}}
 function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
@@ -186,8 +193,8 @@ function BandTip(p){var b=p.band,store=p.store;var flip=p.y<130;
   var listening=p.listenId===b.id;
   var lstRef=useRef(null);
   var onTipWheel=function(e){e.stopPropagation();if(!listening)return;if(e.cancelable)e.preventDefault();var s=e.shiftKey?1.01:1.05;var nq=clamp(b.q*(e.deltaY>0?s:1/s),.1,40);store.update(b.id,{q:+nq.toFixed(2)})};
-  return m("div",{className:"eqov",style:st,onPointerDown:stopE,onDoubleClick:stopE,onWheel:onTipWheel},
-    m("div",{style:{background:"#2a2d36",border:"1px solid rgba(100,116,139,.5)",borderRadius:8,boxShadow:"0 10px 24px rgba(0,0,0,.55)",padding:8,display:"flex",flexDirection:"column",gap:6,position:"relative",opacity:bypassAlpha}},
+  return m("div",{className:"eqov",style:Object.assign({},st,{opacity:p.fade?0:1,transition:"opacity .35s"}),onPointerDown:stopE,onDoubleClick:stopE,onWheel:onTipWheel},
+    m("div",{style:{background:"rgba(42,45,54,.52)",backdropFilter:"blur(6px)",WebkitBackdropFilter:"blur(6px)",border:"1px solid rgba(100,116,139,.45)",borderRadius:8,boxShadow:"0 10px 24px rgba(0,0,0,.35)",padding:8,display:"flex",flexDirection:"column",gap:6,position:"relative",opacity:bypassAlpha}},
       m("div",{style:{display:"flex",alignItems:"center",gap:8}},
         m("button",{style:{padding:4,borderRadius:4,border:"none",cursor:"pointer",background:b.bypass?"rgba(100,116,139,.15)":"rgba(34,211,238,.12)",color:b.bypass?"#64748b":"#22d3ee",display:"flex"},onClick:function(e){e.stopPropagation();store.toggleBypass(b.id)}},m(PowerIcon,{size:12})),
         m(EditableValue,{value:b.freq,min:20,max:20000,fmt:fmtFreq,style:{color:"inherit"},onChange:function(v){store.update(b.id,{freq:Math.round(v)})}}),
@@ -274,6 +281,10 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var _a=useState(null);var activeId=_a[0],setActiveId=_a[1];
   var _l=useState(null);var listenId=_l[0],setListenId=_l[1];
   var tipTimer=useRef(null);
+  var _f=useState(false);var tipFade=_f[0],setTipFade=_f[1];var fadeTimer=useRef(null);
+  var clearFade=function(){if(fadeTimer.current){clearTimeout(fadeTimer.current);fadeTimer.current=null}};
+  var showTip=function(id){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}setTipFade(false);setTip(id)};
+  var fadeTip=function(d){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}fadeTimer.current=setTimeout(function(){setTipFade(true);fadeTimer.current=setTimeout(function(){setTip(null)},350)},d)};
   useEffect(function(){return function(){if(tipTimer.current)clearTimeout(tipTimer.current)}},[]);
   useEffect(function(){var h=function(){setListenId(null)};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
   useEffect(function(){
@@ -311,27 +322,40 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(String(sd),W-28,sd===0?sy+8:sy)}
   // 频谱：DSP 已输出 SP_LEN(=256) 个对数频率、已平滑的点，UI 直接绘制（二次贝塞尔柔化），不再采样/平滑
   var SPW=W-34;
-  var sx=function(i){return i/(Math.max(1,SP_LEN-1))*SPW};
+  var sx=function(i){return ((i+0.5)/Math.max(1,SP_LEN))*W};
   var sy=function(v){return sp2y(v)*H};
+  // preEQ（输入）频谱：冷色灰蓝半透明（背景参考）
+  if(IPS_LEN>1){
+    var isx=function(i){return ((i+0.5)/Math.max(1,IPS_LEN))*W};
+    ctx.fillStyle="rgba(148,163,184,.10)";
+    ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,sp2y(IPS[0])*H);
+    for(i=0;i<IPS_LEN-1;i++){var ix=isx(i),inx=isx(i+1),iy=sp2y(IPS[i])*H,iny=sp2y(IPS[i+1])*H;ctx.quadraticCurveTo(ix,iy,(ix+inx)/2,(iy+iny)/2)}
+    ctx.lineTo(W,sp2y(IPS[IPS_LEN-1])*H);ctx.lineTo(W,H);ctx.closePath();ctx.fill();
+    ctx.strokeStyle="rgba(148,163,184,.28)";ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(0,sp2y(IPS[0])*H);
+    for(i=0;i<IPS_LEN-1;i++){var ix2=isx(i),inx2=isx(i+1),iy2=sp2y(IPS[i])*H,iny2=sp2y(IPS[i+1])*H;ctx.quadraticCurveTo(ix2,iy2,(ix2+inx2)/2,(iy2+iny2)/2)}
+    ctx.lineTo(W,sp2y(IPS[IPS_LEN-1])*H);ctx.stroke();
+  }
   // 填充（底部闭合）
   ctx.fillStyle="rgba(255,229,185,.13)";
   ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,sy(SP[0]));
   for(i=0;i<SP_LEN-1;i++){var x=sx(i),nx=sx(i+1),y=sy(SP[i]),ny=sy(SP[i+1]);ctx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}
-  ctx.lineTo(SPW,sy(SP[SP_LEN-1]));ctx.lineTo(SPW,H);ctx.closePath();ctx.fill();
+  ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.lineTo(W,H);ctx.closePath();ctx.fill();
   // 顶部描边
   ctx.strokeStyle="rgba(255,229,185,.38)";ctx.lineWidth=1.2;
   ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
   for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
-  ctx.lineTo(SPW,sy(SP[SP_LEN-1]));ctx.stroke();
+  ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.stroke();
   if(EQCURVE_LEN>0)applyEqCurve(W);else if(CURVE_DIRTY)mockCurve(b,W);
+  smoothCurve(CURVE,W);smoothCurve(CURVE2,W);
   // Detect M/S split
   var split=false;
   for(i=8;i<W;i+=8){if(Math.abs(g2y(CURVE[i])*H-g2y(CURVE2[i])*H)>Math.max(2,H*.008)){split=true;break}}
   var selB2=store.selB;
-  var trace=function(arr){ctx.beginPath();for(var j=0;j<W;j++){var yj=g2y(arr[j])*H;j===0?ctx.moveTo(j,yj):ctx.lineTo(j,yj)}ctx.stroke()};
+  var trace=function(arr){ctx.beginPath();ctx.moveTo(0,g2y(arr[0])*H);for(var j=0;j<W-1;j++){var x=j,nx=j+1,y=g2y(arr[j])*H,ny=g2y(arr[j+1])*H;ctx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}ctx.stroke()};
   if(!split){
-    ctx.globalAlpha=.22;ctx.lineWidth=4;ctx.strokeStyle="rgba(234,179,8,1)";trace(CURVE);
-    ctx.globalAlpha=1;ctx.lineWidth=1.6;ctx.strokeStyle="rgba(255,229,185,.95)";trace(CURVE);
+    ctx.globalAlpha=.2;ctx.lineWidth=3;ctx.strokeStyle="rgba(234,179,8,1)";trace(CURVE);
+    ctx.globalAlpha=1;ctx.lineWidth=1.2;ctx.strokeStyle="rgba(255,229,185,.95)";trace(CURVE);
   }else{
     var fM=1,fS=1;
     if(selB2){if(selB2.mode==="mid"){fM=1;fS=.25}else if(selB2.mode==="side"){fM=.25;fS=1}}
@@ -343,11 +367,11 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
       return g};
     var gS=mkGrad("56,189,248"),gM=mkGrad("34,197,94");
     // Side curve: glow (width*2.5, alpha*0.25) then core — bottom layer
-    ctx.globalAlpha=fS*.25;ctx.lineWidth=fS>.9?4.5:3;ctx.strokeStyle=gS;trace(CURVE2);
-    ctx.globalAlpha=fS;ctx.lineWidth=fS>.9?1.8:1.2;ctx.strokeStyle=gS;trace(CURVE2);
+    ctx.globalAlpha=fS*.25;ctx.lineWidth=fS>.9?3.5:2.5;ctx.strokeStyle=gS;trace(CURVE2);
+    ctx.globalAlpha=fS;ctx.lineWidth=fS>.9?1.4:1.0;ctx.strokeStyle=gS;trace(CURVE2);
     // Mid curve: glow then core — top layer
-    ctx.globalAlpha=fM*.25;ctx.lineWidth=fM>.9?4.5:3;ctx.strokeStyle=gM;trace(CURVE);
-    ctx.globalAlpha=fM;ctx.lineWidth=fM>.9?1.8:1.2;ctx.strokeStyle=gM;trace(CURVE);
+    ctx.globalAlpha=fM*.25;ctx.lineWidth=fM>.9?3.5:2.5;ctx.strokeStyle=gM;trace(CURVE);
+    ctx.globalAlpha=fM;ctx.lineWidth=fM>.9?1.4:1.0;ctx.strokeStyle=gM;trace(CURVE);
     ctx.globalAlpha=1;
   }
   for(i=0;i<b.length;i++){var bn=b[i];if(!bn.active||bn.mute)continue;var nx=f2x(bn.freq)*W,ny=g2y(bn.gain)*H,isSel=bn.id===store.sel;var nodeAlpha=listenId&&bn.id!==listenId?.15:(bn.bypass?.35:1);
@@ -367,10 +391,10 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   };rid=requestAnimationFrame(draw);return function(){cancelAnimationFrame(rid)}},[dims,store.B,store.sel,listenId]);
   var hitTest=function(mx,my){for(var i=store.B.length-1;i>=0;i--){var b=store.B[i];if(!b.active||b.mute)continue;if(Math.hypot(mx-f2x(b.freq)*dims.w,my-g2y(b.gain)*dims.h)<14)return b}return null};
   var drag=useRef(null);
-  var onPD=function(e){e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);setTip(t.id);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
-  var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov"))return;var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);setTip(null);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}if(nid!==null){tipTimer.current=setTimeout(function(){setTip(nid)},120)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
+  var onPD=function(e){e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1000);drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
+  var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov")){clearFade();setTipFade(false);return;}var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);if(nid!==null){if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}tipTimer.current=setTimeout(function(){showTip(nid)},120)}else{fadeTip(900)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
   var onPU=function(){drag.current=null;setActiveId(null)};
-  var onPL=function(){setHoverId(null);setTip(null);if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}};
+  var onPL=function(){setHoverId(null);fadeTip(700)};
   var onWheel=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){e.preventDefault();var s=e.shiftKey?1.01:1.05,nq=Math.max(.1,Math.min(40,t.q*(e.deltaY>0?s:1/s)));store.update(t.id,{q:+nq.toFixed(2)})}};
   var onDC=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t)store.update(t.id,{gain:0});else store.add(Math.round(x2f(mx/dims.w)),+y2g(my/dims.h).toFixed(1))};
   var showTipId=tip!==null?tip:(activeId!==null?activeId:store.sel),tipB=null,tipIdx=0,i2;
@@ -378,7 +402,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   return m("div",{className:"flex-1",style:{display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
     m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onWheel:onWheel},
       m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
-      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:setListenId}):null,
+      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:setListenId,fade:tipFade}):null,
       store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null
     ),
     m("div",{style:{width:86,flex:"0 0 86px",display:"flex",alignItems:"stretch",justifyContent:"center",borderLeft:"1px solid rgba(255,255,255,.06)",background:"#0d0f14"}},

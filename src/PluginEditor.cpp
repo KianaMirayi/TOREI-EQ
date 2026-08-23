@@ -151,22 +151,22 @@ void ToreiEQAudioProcessorEditor::timerCallback()
 
     // Push the real incoming audio level to the frontend meter.
     juce::DynamicObject::Ptr obj = new juce::DynamicObject();
-    obj->setProperty ("peak", getAudioPeakDb());
-    obj->setProperty ("rms",  getAudioRmsDb());
+    obj->setProperty ("peak", processorRef.getPeakDb());
+    obj->setProperty ("rms",  processorRef.getRmsDb());
     webView->emitEventIfBrowserIsVisible ("Audio_Level", obj.get());
 
     // Apply the host-tunable smoothing parameters before computing the spectrum.
-    setSpectrumSmoothing (processorRef.spectrumAttack->get(),
-                          processorRef.spectrumRelease->get(),
-                          (int) std::lround (processorRef.spectrumBlur->get()),
-                          (int) std::lround (processorRef.spectrumDilate->get()),
-                          processorRef.spectrumBand->get());
+    processorRef.setSpectrumSmoothing (processorRef.spectrumAttack->get(),
+                                       processorRef.spectrumRelease->get(),
+                                       (int) std::lround (processorRef.spectrumBlur->get()),
+                                       (int) std::lround (processorRef.spectrumDilate->get()),
+                                       processorRef.spectrumBand->get());
 
     // Push the smoothed log-spaced spectrum to the frontend (dBFS points).
     if (spectrumScratch == nullptr)
         spectrumScratch.calloc (kSpectrumPointCount);
 
-    const int points = readSpectrum (spectrumScratch.getData(), kSpectrumPointCount);
+    const int points = processorRef.readSpectrumPre (spectrumScratch.getData(), kSpectrumPointCount);
 
     if (points > 0)
     {
@@ -181,6 +181,27 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         }
 
         webView->emitEventIfBrowserIsVisible ("Spectrum_Data", spectrumPayload);
+    }
+
+    // Push the POST (output) spectrum on its own channel so the UI can overlay the
+    // pre/post curves Pro-Q style. Same log-spaced layout and smoothing as pre.
+    if (spectrumPostScratch == nullptr)
+        spectrumPostScratch.calloc (kSpectrumPointCount);
+
+    const int postPoints = processorRef.readSpectrumPost (spectrumPostScratch.getData(), kSpectrumPointCount);
+
+    if (postPoints > 0)
+    {
+        spectrumPostPayload.clearQuick();
+        spectrumPostPayload.ensureStorageAllocated (postPoints);
+
+        for (int i = 0; i < postPoints; ++i)
+        {
+            const float v = std::round (spectrumPostScratch[i] * 10.0f) * 0.1f;
+            spectrumPostPayload.add (juce::var ((double) v));
+        }
+
+        webView->emitEventIfBrowserIsVisible ("Spectrum_Data_Post", spectrumPostPayload);
     }
 
     // Push the EQ magnitude response (dB, log-spaced 20 Hz..20 kHz) to the UI.

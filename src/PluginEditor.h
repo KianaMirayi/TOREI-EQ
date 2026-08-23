@@ -40,6 +40,9 @@ private:
     juce::HeapBlock<float> spectrumScratch;   // allocated lazily (kSpectrumBinCount)
     juce::Array<juce::var> spectrumPayload;   // reused across frames
 
+    juce::HeapBlock<float> spectrumPostScratch;  // POST (output) spectrum
+    juce::Array<juce::var> spectrumPostPayload;  // reused across frames
+
     juce::HeapBlock<float> curveScratch;      // EqEngine::kCurvePoints floats
     juce::Array<juce::var> curvePayload;      // reused across frames
 

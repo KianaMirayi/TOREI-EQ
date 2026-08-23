@@ -9,7 +9,7 @@ class EqEngine
 {
 public:
     static constexpr int kMaxBands    = 24;
-    static constexpr int kCurvePoints = 200;   // magnitude-response samples for the UI
+    static constexpr int kCurvePoints = 512;   // magnitude-response samples for the UI
 
     // Filter types, matching the UI's string identifiers.
     enum Type

@@ -7,15 +7,6 @@
 #include <cmath>
 #include <algorithm>
 
-namespace
-{
-    std::atomic<float> gPeakDb { -90.0f };
-    std::atomic<float> gRmsDb  { -90.0f };
-}
-
-float getAudioPeakDb() { return gPeakDb.load (std::memory_order_relaxed); }
-float getAudioRmsDb()  { return gRmsDb.load  (std::memory_order_relaxed); }
-
 ToreiEQAudioProcessor::ToreiEQAudioProcessor()
     : juce::AudioProcessor(BusesProperties()
         .withInput("Input", juce::AudioChannelSet::stereo(), true)
@@ -45,24 +36,27 @@ ToreiEQAudioProcessor::ToreiEQAudioProcessor()
 
 ToreiEQAudioProcessor::~ToreiEQAudioProcessor()
 {
-    // Tear down the spectrum analyser and its dsp::FFT during normal shutdown,
-    // before static teardown. Standalone's deletePlugin() reaches here via
-    // `processor = nullptr` without guaranteeing that releaseResources() is
-    // called, so without this the FFT (held by the process-lifetime global
-    // gAnalyzer) survives until exit and trips JUCE's "leaked FFT" assertion.
-    resetSpectrum();
+    // Tear down the per-instance spectrum analysers and their dsp::FFT during
+    // normal shutdown, before static teardown. Standalone's deletePlugin() reaches
+    // here via `processor = nullptr` without guaranteeing that releaseResources()
+    // is called, so without this the FFT (held by the per-instance analyser)
+    // survives until exit and trips JUCE's "leaked FFT" assertion.
+    analyzerPre.reset();
+    analyzerPost.reset();
 }
 
 void ToreiEQAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused (sampleRate, samplesPerBlock);
-    prepareSpectrum (sampleRate, samplesPerBlock);
+    analyzerPre.prepare (sampleRate, samplesPerBlock);
+    analyzerPost.prepare (sampleRate, samplesPerBlock);
     eqEngine.prepare (sampleRate, samplesPerBlock);
 }
 
 void ToreiEQAudioProcessor::releaseResources()
 {
-    resetSpectrum();
+    analyzerPre.reset();
+    analyzerPost.reset();
     eqEngine.reset();
 }
 
@@ -103,14 +97,15 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             v.store (next, std::memory_order_relaxed);
         };
 
-        update (gPeakDb, peakDb);
-        update (gRmsDb,  rmsDb);
+        update (this->peakDb, peakDb);
+        update (this->rmsDb,  rmsDb);
     }
 
-    // Feed the spectrum analyser (lock-free downmix + ring-buffer write).
-    pushAudioToSpectrum (buffer.getArrayOfReadPointers(),
-                         buffer.getNumChannels(),
-                         buffer.getNumSamples());
+    // Feed the PRE (input) spectrum analyser (lock-free downmix + ring-buffer
+    // write) BEFORE the EQ mutates the buffer, so it captures the incoming signal.
+    analyzerPre.push (buffer.getArrayOfReadPointers(),
+                      buffer.getNumChannels(),
+                      buffer.getNumSamples());
 
     // --- Temporary Phase-1 diagnostic: prove the EQ actually changes the audio.
     // Captures the pre-EQ sum, applies the EQ, then logs pre/post the FIRST time a
@@ -138,6 +133,13 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     // Apply the static EQ (biquad bands).
     eqEngine.process (buffer);
+
+    // Feed the POST (output) spectrum analyser AFTER the EQ. The buffer is
+    // processed in place, so this captures the EQ'd (post) signal. pre/post are
+    // kept aligned by the same downmix and smoothing inside each analyser.
+    analyzerPost.push (buffer.getArrayOfReadPointers(),
+                       buffer.getNumChannels(),
+                       buffer.getNumSamples());
 
     ++procBlocks;
     if (! procLogged && eqEngine.hasNonUnityBand())
