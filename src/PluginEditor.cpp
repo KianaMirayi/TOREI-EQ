@@ -219,6 +219,27 @@ void ToreiEQAudioProcessorEditor::timerCallback()
 
     webView->emitEventIfBrowserIsVisible ("EQ_Curve_Data", curvePayload);
 
+    // Push the listen state (hold-to-listen target band, -1 = none) whenever it
+    // changes. Change-detection rather than every frame: it keeps the bridge quiet
+    // while still guaranteeing the "DSP cleared listen by itself" path is pushed
+    // (that IS a change), which is the case the UI needs to stay in sync with.
+    {
+        const int listen = processorRef.getEqEngine().getListenIndex();
+
+        if (listen != lastPushedListenIndex)
+        {
+            lastPushedListenIndex = listen;
+
+            if (listenStateObj == nullptr)
+                listenStateObj = new juce::DynamicObject();
+
+            listenStateObj->setProperty ("index", listen);
+            webView->emitEventIfBrowserIsVisible ("EQ_Listen_State", listenStateObj.get());
+
+            logEq ("SEND EQ_Listen_State  index=" + juce::String (listen));
+        }
+    }
+
     {
         static bool curveLoggedOnce = false;
         if (! curveLoggedOnce)
@@ -261,11 +282,70 @@ void ToreiEQAudioProcessorEditor::handleParameterChange (const juce::var& object
 
         processorRef.getEqEngine().setParam (index, param, value);
         logEq ("ENGINE after setParam  " + processorRef.getEqEngine().describe());
+
+        // `listen` / `soloLevel` are transient audition state and are deliberately
+        // NOT saved, so they must not mark the project as modified either.
+        if (param != "listen" && param != "soloLevel")
+            notifyHostStateChanged();
     }
     else
     {
         logEq ("RECV Parameter_Change  (not an object)  raw=" + object.toString());
     }
+}
+
+void ToreiEQAudioProcessorEditor::notifyHostStateChanged()
+{
+    // ChangeDetails must carry nonParameterStateChanged: the VST3 wrapper only calls
+    // setDirty() when that flag is set (it maps it to its internal
+    // pluginShouldBeMarkedDirtyFlag). A default-constructed ChangeDetails therefore
+    // does nothing at all.
+    processorRef.updateHostDisplay (
+        juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged (true));
+}
+
+void ToreiEQAudioProcessorEditor::pushBandState()
+{
+    if (webView == nullptr)
+        return;
+
+    EqEngine::BandInfo info[EqEngine::kMaxBands];
+    const int n = processorRef.getEqEngine().getBandSnapshot (info, EqEngine::kMaxBands);
+
+    juce::Array<juce::var> payload;
+    payload.ensureStorageAllocated (n);
+
+    for (int i = 0; i < n; ++i)
+    {
+        juce::DynamicObject::Ptr o = new juce::DynamicObject();
+        o->setProperty ("index",  info[i].index);
+        o->setProperty ("type",   juce::String (EqEngine::typeToString (info[i].type)));
+        o->setProperty ("freq",   (double) info[i].freq);
+        o->setProperty ("gain",   (double) info[i].gain);
+        o->setProperty ("q",      (double) info[i].q);
+        o->setProperty ("bypass", info[i].bypass);
+        payload.add (juce::var (o.get()));
+    }
+
+    webView->emitEventIfBrowserIsVisible ("Band_State", payload);
+
+    logEq ("SEND Band_State  bands=" + juce::String (n));
+}
+
+void ToreiEQAudioProcessorEditor::pushOutputState()
+{
+    if (webView == nullptr)
+        return;
+
+    const float gainDb = processorRef.getEqEngine().getOutputGainDb();
+
+    if (outputStateObj == nullptr)
+        outputStateObj = new juce::DynamicObject();
+
+    outputStateObj->setProperty ("gain", (double) gainDb);
+    webView->emitEventIfBrowserIsVisible ("Output_State", outputStateObj.get());
+
+    logEq ("SEND Output_State  gain=" + juce::String (gainDb));
 }
 
 void ToreiEQAudioProcessorEditor::handleCommand (const juce::var& object)
@@ -288,6 +368,7 @@ void ToreiEQAudioProcessorEditor::handleCommand (const juce::var& object)
 
             processorRef.getEqEngine().addBand (index, EqEngine::typeFromString (type), freq, gain, q);
             logEq ("ENGINE after addBand  " + processorRef.getEqEngine().describe());
+            notifyHostStateChanged();
         }
         else if (cmd == "RemoveBand")
         {
@@ -295,6 +376,17 @@ void ToreiEQAudioProcessorEditor::handleCommand (const juce::var& object)
             logEq ("RECV Command RemoveBand  index=" + juce::String (index));
             processorRef.getEqEngine().removeBand (index);
             logEq ("ENGINE after removeBand  " + processorRef.getEqEngine().describe());
+            notifyHostStateChanged();
+        }
+        else if (cmd == "Request_State")
+        {
+            // The UI asks for the authoritative state on mount. C++ owns the bands
+            // (EqEngine outlives the editor, so closing/reopening the window or
+            // switching plugins must NOT reset them), and the UI mirrors what it
+            // gets back instead of pushing its own defaults.
+            logEq ("RECV Command Request_State");
+            pushBandState();
+            pushOutputState();
         }
         else
         {

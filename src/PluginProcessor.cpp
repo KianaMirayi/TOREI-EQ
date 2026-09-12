@@ -64,42 +64,8 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // Measure the incoming signal on the left channel. This is intentionally the
-    // only thing the audio thread does: no allocation, no `this` member access.
-    if (buffer.getNumChannels() > 0 && buffer.getNumSamples() > 0)
-    {
-        const auto* data = buffer.getReadPointer (0);
-        const auto n = buffer.getNumSamples();
-
-        float peak = 0.0f;
-        float sumSquares = 0.0f;
-
-        for (int i = 0; i < n; ++i)
-        {
-            const float s = data[i];
-            const float a = std::fabs (s);
-            if (a > peak)
-                peak = a;
-
-            sumSquares += s * s;
-        }
-
-        constexpr float floorDb = -90.0f;
-        const float peakDb = std::max (floorDb, 20.0f * std::log10 (std::max (1e-9f, peak)));
-        const float rmsDb  = std::max (floorDb, 20.0f * std::log10 (std::max (1e-9f, std::sqrt (sumSquares / (float) n))));
-
-        // Simple attack/release smoothing so the meter is readable.
-        const auto update = [] (std::atomic<float>& v, float target)
-        {
-            const float cur = v.load (std::memory_order_relaxed);
-            const float next = target > cur ? cur + (target - cur) * 0.4f
-                                            : cur + (target - cur) * 0.08f;
-            v.store (next, std::memory_order_relaxed);
-        };
-
-        update (this->peakDb, peakDb);
-        update (this->rmsDb,  rmsDb);
-    }
+    // NOTE: the level meter is measured at the END of the chain (see below), not
+    // here, so it reports the true OUTPUT level and follows the Output trim.
 
     // Feed the PRE (input) spectrum analyser (lock-free downmix + ring-buffer
     // write) BEFORE the EQ mutates the buffer, so it captures the incoming signal.
@@ -141,6 +107,46 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                        buffer.getNumChannels(),
                        buffer.getNumSamples());
 
+    // Measure the level meter on the OUTPUT (channel 0), i.e. after the whole chain
+    // including the Output trim. This makes the meter report what actually leaves the
+    // plugin, so it tracks both the EQ and the Output control -- and it matches what
+    // LISTEN_FEATURE_HANDOFF.md §7 already documented ("电平表 ... 在 EQ 之后采集").
+    // Still allocation-free and lock-free, so it stays audio-thread safe.
+    if (buffer.getNumChannels() > 0 && buffer.getNumSamples() > 0)
+    {
+        const auto* data = buffer.getReadPointer (0);
+        const auto n = buffer.getNumSamples();
+
+        float peak = 0.0f;
+        float sumSquares = 0.0f;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float s = data[i];
+            const float a = std::fabs (s);
+            if (a > peak)
+                peak = a;
+
+            sumSquares += s * s;
+        }
+
+        constexpr float floorDb = -90.0f;
+        const float outPeakDb = std::max (floorDb, 20.0f * std::log10 (std::max (1e-9f, peak)));
+        const float outRmsDb  = std::max (floorDb, 20.0f * std::log10 (std::max (1e-9f, std::sqrt (sumSquares / (float) n))));
+
+        // Simple attack/release smoothing so the meter is readable.
+        const auto update = [] (std::atomic<float>& v, float target)
+        {
+            const float cur = v.load (std::memory_order_relaxed);
+            const float next = target > cur ? cur + (target - cur) * 0.4f
+                                            : cur + (target - cur) * 0.08f;
+            v.store (next, std::memory_order_relaxed);
+        };
+
+        update (this->peakDb, outPeakDb);
+        update (this->rmsDb,  outRmsDb);
+    }
+
     ++procBlocks;
     if (! procLogged && eqEngine.hasNonUnityBand())
     {
@@ -170,6 +176,83 @@ void ToreiEQAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 juce::AudioProcessorEditor* ToreiEQAudioProcessor::createEditor()
 {
     return new ToreiEQAudioProcessorEditor(*this);
+}
+
+void ToreiEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    // Serialise only the PERSISTED band parameters. `listen` and `soloLevel` are
+    // transient audition state and are intentionally excluded (see
+    // LISTEN_FEATURE_HANDOFF.md §7).
+    juce::ValueTree root ("TOREI_EQ_STATE");
+    root.setProperty ("version", 1, nullptr);
+
+    // Output (trim) gain is a persisted user setting -- unlike listen/soloLevel.
+    root.setProperty ("outputGain", (double) eqEngine.getOutputGainDb(), nullptr);
+
+    EqEngine::BandInfo info[EqEngine::kMaxBands];
+    const int n = eqEngine.getBandSnapshot (info, EqEngine::kMaxBands);
+
+    for (int i = 0; i < n; ++i)
+    {
+        juce::ValueTree band ("BAND");
+        band.setProperty ("index",  info[i].index, nullptr);
+        band.setProperty ("type",   juce::String (EqEngine::typeToString (info[i].type)), nullptr);
+        band.setProperty ("freq",   (double) info[i].freq, nullptr);
+        band.setProperty ("gain",   (double) info[i].gain, nullptr);
+        band.setProperty ("q",      (double) info[i].q, nullptr);
+        band.setProperty ("bypass", info[i].bypass, nullptr);
+        root.appendChild (band, nullptr);
+    }
+
+    if (auto xml = root.createXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void ToreiEQAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+
+    if (xml == nullptr || ! xml->hasTagName ("TOREI_EQ_STATE"))
+        return;
+
+    auto root = juce::ValueTree::fromXml (*xml);
+
+    if (! root.isValid())
+        return;
+
+    // Clear FIRST: slots absent from the incoming state would otherwise stay
+    // occupied and blend with the restored bands.
+    eqEngine.clearAllBands();
+
+    for (int i = 0; i < root.getNumChildren(); ++i)
+    {
+        auto band = root.getChild (i);
+
+        if (! band.hasType ("BAND"))
+            continue;
+
+        const int index = (int) band.getProperty ("index", -1);
+
+        if (index < 0 || index >= EqEngine::kMaxBands)
+            continue;
+
+        eqEngine.addBand (index,
+                          EqEngine::typeFromString (band.getProperty ("type").toString()),
+                          (float) (double) band.getProperty ("freq", 1000.0),
+                          (float) (double) band.getProperty ("gain", 0.0),
+                          (float) (double) band.getProperty ("q", 1.0));
+
+        if ((bool) band.getProperty ("bypass", false))
+            eqEngine.setParam (index, "bypass", true);
+    }
+
+    // Output (trim) gain. Defaults to 0 dB for projects saved before this existed.
+    eqEngine.setOutputGainDb ((float) (double) root.getProperty ("outputGain", 0.0));
+
+    // Let the host refresh anything it derives from our state. Note the explicit
+    // nonParameterStateChanged flag: the VST3 wrapper only marks the project dirty
+    // when that is set.
+    updateHostDisplay (juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged (true));
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

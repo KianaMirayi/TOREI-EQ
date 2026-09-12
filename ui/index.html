@@ -63,14 +63,38 @@ function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE
 function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
-  var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"}]);B=_r[0];setB=_r[1];
+  var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0}]);B=_r[0];setB=_r[1];
   _r=useState(null);sel=_r[0];setSel=_r[1];
+  // Solo listen level (dB): how loud the soloed band is played back while holding
+  // the headphone button. GLOBAL (not per band) and NOT an EQ gain -- it only makes
+  // weak bands audible. Pushed with index=-1 so the DSP can tell it apart from a
+  // real band parameter.
+  // Per-band solo listen level (dB). Each band keeps its OWN value so the readout
+  // follows the selected band instead of one shared global (which looked like the
+  // value "stacked" when switching bands). The DSP keeps a single global value, but it
+  // only applies while listening -- and applyListen() re-sends the target band's value
+  // whenever listen is (re)targeted, so no C++ change is needed.
+  var setBandSoloLevel=function(id,v){setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,{soloDb:v}):b})});sendParam(-1,"soloLevel",v)};
+  // Output Gain (final make-up gain, dB): a user SETTING that lives at the end of the
+  // chain. Unlike soloLevel it IS persisted by C++ (see OUTPUT_GAIN_HANDOFF.md).
+  // adoptOutputGain() updates the local value only -- used when C++ pushes Output_State,
+  // so we do not echo the value straight back to the DSP.
+  var og,setOg;_r=useState(0);og=_r[0];setOg=_r[1];
+  var setOutputGain=function(v){setOg(v);sendParam(-1,"outputGain",v)};
+  var adoptOutputGain=function(v){setOg(v)};
+  // Whether a band is currently soloed. Mirrors EQCanvas' listenId (which is local to
+  // that component) so the bottom bar in App can highlight without reaching into it.
+  var lst,setLst;_r=useState(false);lst=_r[0];setLst=_r[1];
+  // Adopt C++'s band list wholesale. C++ is the single source of truth for band state
+  // (see STATE_PERSISTENCE_HANDOFF.md), so on mount the UI replaces its own array with
+  // the DSP's instead of pushing local defaults at it.
+  var replaceBands=function(arr){CURVE_DIRTY=true;setB(arr)};
   var update=function(id,chg){CURVE_DIRTY=true;setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,chg):b})});for(var k in chg)sendParam(id,k,chg[k])};
-  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo"};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
+  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
   var rem=function(id){CURVE_DIRTY=true;setB(function(p){return p.filter(function(b){return b.id!==id})});setSel(function(p){return p===id?null:p});sendCmd("RemoveBand",{index:id})};
   var toggle=function(id){update(id,{active:!B.find(function(b){return b.id===id}).active})};
   var toggleBypass=function(id){update(id,{bypass:!B.find(function(b){return b.id===id}).bypass})};
-  return{B:B,sel:sel,selB:B.find(function(b){return b.id===sel})||null,setSel:setSel,update:update,add:add,remove:rem,toggle:toggle,toggleBypass:toggleBypass};
+  return{B:B,sel:sel,selB:B.find(function(b){return b.id===sel})||null,setSel:setSel,update:update,add:add,remove:rem,toggle:toggle,toggleBypass:toggleBypass,setBandSoloLevel:setBandSoloLevel,outputGain:og,setOutputGain:setOutputGain,adoptOutputGain:adoptOutputGain,selSoloDb:(B.find(function(b){return b.id===sel})||{soloDb:0}).soloDb||0,listening:lst,setListening:setLst,replaceBands:replaceBands};
 }
 
 var peakRef={rms:-3,peak:-3,hold:-3,frames:0};
@@ -198,7 +222,7 @@ function BandTip(p){var b=p.band,store=p.store;var flip=p.y<130;
       m("div",{style:{display:"flex",alignItems:"center",gap:8}},
         m("button",{style:{padding:4,borderRadius:4,border:"none",cursor:"pointer",background:b.bypass?"rgba(100,116,139,.15)":"rgba(34,211,238,.12)",color:b.bypass?"#64748b":"#22d3ee",display:"flex"},onClick:function(e){e.stopPropagation();store.toggleBypass(b.id)}},m(PowerIcon,{size:12})),
         m(EditableValue,{value:b.freq,min:20,max:20000,fmt:fmtFreq,style:{color:"inherit"},onChange:function(v){store.update(b.id,{freq:Math.round(v)})}}),
-        m("button",{style:{padding:4,borderRadius:4,border:"none",cursor:listening?"grabbing":"grab",background:listening?"#0891b2":"#1e293b",color:listening?"#fff":"#94a3b8",display:"flex",marginLeft:"auto",transition:"all .15s"},onPointerDown:function(e){e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId);lstRef.current={x:e.clientX,y:e.clientY,f:b.freq,g:b.gain,q:b.q||1};p.setListenId(b.id)},onPointerMove:function(e){var d=lstRef.current;if(!d||!listening)return;e.stopPropagation();if(e.altKey){var nq=clamp(d.q-(e.clientY-d.y)*.1,.1,40);store.update(b.id,{q:+nq.toFixed(2)})}else{var ng=clamp(d.g-(e.clientY-d.y)*.15,-30,30),nf=Math.round(clamp(d.f*Math.pow(2,(e.clientX-d.x)/200),20,20000));store.update(b.id,{gain:+ng.toFixed(1),freq:nf})}},onPointerUp:function(e){e.stopPropagation();lstRef.current=null;p.setListenId(null)},onPointerCancel:function(){lstRef.current=null;p.setListenId(null)},onClick:stopE},m(HeadphoneIcon,{size:12}))
+        m("button",{style:{padding:4,borderRadius:4,border:"none",cursor:listening?"grabbing":"grab",background:listening?"#0891b2":"#1e293b",color:listening?"#fff":"#94a3b8",display:"flex",marginLeft:"auto",transition:"all .15s"},onPointerDown:function(e){e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId);lstRef.current={x:e.clientX,y:e.clientY,f:b.freq,q:b.q||1,solo:(b.soloDb||0)};p.setListenId(b.id)},onPointerMove:function(e){var d=lstRef.current;if(!d||!listening)return;e.stopPropagation();if(e.altKey||e.ctrlKey||e.metaKey){var nq=clamp(d.q-(e.clientY-d.y)*.1,.1,40);store.update(b.id,{q:+nq.toFixed(2)})}else{var ns=clamp(d.solo-(e.clientY-d.y)*.15,-24,24);store.setBandSoloLevel(b.id,+ns.toFixed(1));var nf=Math.round(clamp(d.f*Math.pow(2,(e.clientX-d.x)/200),20,20000));store.update(b.id,{freq:nf})}},onPointerUp:function(e){e.stopPropagation();lstRef.current=null;p.setListenId(null)},onPointerCancel:function(){lstRef.current=null;p.setListenId(null)},onClick:stopE},m(HeadphoneIcon,{size:12}))
       ),
       m("div",{style:{display:"flex",padding:"0 2px"}},m(TypePill,{band:b,store:store})),
       m("div",{style:{display:"flex",justifyContent:"space-between",gap:16,padding:"0 2px",fontSize:10,letterSpacing:.5}},
@@ -280,16 +304,31 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var _t=useState(null);var tip=_t[0],setTip=_t[1];
   var _a=useState(null);var activeId=_a[0],setActiveId=_a[1];
   var _l=useState(null);var listenId=_l[0],setListenId=_l[1];
+  // Listen is UI-local state, but the DSP must follow it: every change to listenId is
+  // mirrored to C++ as Parameter_Change {param:"listen"}. Routing every call site
+  // through applyListen() keeps the headphone button, the S key and the pointerup
+  // safety net in sync from one single place.
+  var listenRef=useRef(null);
+  var applyListen=function(id){if(listenRef.current===id)return;if(listenRef.current!==null)sendParam(listenRef.current,"listen",false);if(id!==null){sendParam(id,"listen",true);var _lb=null;for(var _li=0;_li<store.B.length;_li++)if(store.B[_li].id===id){_lb=store.B[_li];break}sendParam(-1,"soloLevel",_lb?(_lb.soloDb||0):0)}listenRef.current=id;setListenId(id)};
+  useEffect(function(){store.setListening(listenId!==null)},[listenId]);
+  // C++ -> UI: the DSP can clear listen by itself (e.g. the listened band was
+  // removed, or bypassed). Mirror that into listenId WITHOUT echoing anything back
+  // to C++ -- routing this through applyListen() would send the change straight back
+  // and could ping-pong with the DSP.
+  useEffect(function(){
+    var h=function(o){var idx=(o&&typeof o.index==="number")?o.index:-1;if(idx<0&&listenRef.current===null)return;if(idx===listenRef.current)return;listenRef.current=idx<0?null:idx;setListenId(idx<0?null:idx)};
+    if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.addEventListener("EQ_Listen_State",h);
+  },[]);
   var tipTimer=useRef(null);
   var _f=useState(false);var tipFade=_f[0],setTipFade=_f[1];var fadeTimer=useRef(null);
   var clearFade=function(){if(fadeTimer.current){clearTimeout(fadeTimer.current);fadeTimer.current=null}};
   var showTip=function(id){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}setTipFade(false);setTip(id)};
   var fadeTip=function(d){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}fadeTimer.current=setTimeout(function(){setTipFade(true);fadeTimer.current=setTimeout(function(){setTip(null)},350)},d)};
   useEffect(function(){return function(){if(tipTimer.current)clearTimeout(tipTimer.current)}},[]);
-  useEffect(function(){var h=function(){setListenId(null)};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
+  useEffect(function(){var h=function(){applyListen(null)};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
   useEffect(function(){
-    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel!==null)setListenId(store.sel)}};
-    var ku=function(e){if(e.key==="s"||e.key==="S")setListenId(null)};
+    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel!==null)applyListen(store.sel)}};
+    var ku=function(e){if(e.key==="s"||e.key==="S")applyListen(null)};
     window.addEventListener("keydown",kd);window.addEventListener("keyup",ku);
     return function(){window.removeEventListener("keydown",kd);window.removeEventListener("keyup",ku)}
   },[store.sel]);
@@ -395,14 +434,20 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov")){clearFade();setTipFade(false);return;}var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);if(nid!==null){if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}tipTimer.current=setTimeout(function(){showTip(nid)},120)}else{fadeTip(900)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
   var onPU=function(){drag.current=null;setActiveId(null)};
   var onPL=function(){setHoverId(null);fadeTip(700)};
-  var onWheel=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){e.preventDefault();var s=e.shiftKey?1.01:1.05,nq=Math.max(.1,Math.min(40,t.q*(e.deltaY>0?s:1/s)));store.update(t.id,{q:+nq.toFixed(2)})}};
+  var onWheel=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);
+    // While solo-listening, the band panel sits right beside the node and covers its
+    // small (14 px) hit area, so requiring a hit would make Q unreachable anywhere
+    // except on the panel itself. In listen mode, target the listened band directly,
+    // wherever the cursor happens to be.
+    if(!t&&listenId!==null){for(var wi=0;wi<store.B.length;wi++)if(store.B[wi].id===listenId){t=store.B[wi];break}}
+    if(t){e.preventDefault();var s=e.shiftKey?1.01:1.05,nq=Math.max(.1,Math.min(40,t.q*(e.deltaY>0?s:1/s)));store.update(t.id,{q:+nq.toFixed(2)})}};
   var onDC=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t)store.update(t.id,{gain:0});else store.add(Math.round(x2f(mx/dims.w)),+y2g(my/dims.h).toFixed(1))};
   var showTipId=tip!==null?tip:(activeId!==null?activeId:store.sel),tipB=null,tipIdx=0,i2;
   if(showTipId!==null)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
   return m("div",{className:"flex-1",style:{display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
     m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onWheel:onWheel},
       m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
-      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:setListenId,fade:tipFade}):null,
+      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:applyListen,fade:tipFade}):null,
       store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null
     ),
     m("div",{style:{width:86,flex:"0 0 86px",display:"flex",alignItems:"stretch",justifyContent:"center",borderLeft:"1px solid rgba(255,255,255,.06)",background:"#0d0f14"}},
@@ -424,7 +469,32 @@ function App(){
       queue (window.__EQCMDS). C++ polls that queue via evaluateJavascript, so this
       does NOT depend on the fragile postMessage/emitEvent bridge. The UI_Ready
       diagnostic is dropped (it relied on the broken emitEvent direction). */
-  useEffect(function(){try{for(var i=0;i<store.B.length;i++){var b=store.B[i];sendCmd("AddBand",{index:b.id,freq:b.freq,gain:b.gain,type:b.type,q:b.q})}}catch(e){};},[]);
+  // Mount sync. C++ owns the band state, so ASK for it rather than pushing our local
+  // defaults -- pushing defaults is exactly what wiped the user's EQ whenever the
+  // editor was rebuilt (switching to another plugin and back, closing/reopening the
+  // window). If Band_State does not arrive within 600 ms (a C++ side that does not
+  // implement Request_State yet), fall back to the old push-defaults behaviour so the
+  // UI can never end up blank.
+  var pushDefaultBands=function(){try{for(var i=0;i<store.B.length;i++){var b=store.B[i];sendCmd("AddBand",{index:b.id,freq:b.freq,gain:b.gain,type:b.type,q:b.q})}}catch(e){}};
+  useEffect(function(){
+    var done=false;
+    var adopt=function(arr){
+      if(done)return;done=true;
+      var out=[];
+      if(arr&&arr.length)for(var i=0;i<arr.length;i++){var s=arr[i]||{};if(typeof s.index!=="number")continue;
+        out.push({id:s.index,type:s.type||"peaking",freq:+s.freq||1000,gain:+s.gain||0,q:+s.q||1,slope:1,active:true,mute:false,solo:false,bypass:!!s.bypass,mode:s.mode||"stereo",soloDb:0})}
+      out.sort(function(a,b){return a.id-b.id});
+      store.replaceBands(out)
+    };
+    if(typeof __JUCE__!=="undefined"&&__JUCE__.backend&&__JUCE__.backend.addEventListener){
+      __JUCE__.backend.addEventListener("Band_State",adopt);
+      // C++ owns Output Gain too; adopt its value without echoing it back.
+      __JUCE__.backend.addEventListener("Output_State",function(o){if(o&&typeof o.gain==="number")store.adoptOutputGain(+o.gain)});
+    }
+    sendCmd("Request_State",{});
+    var t=setTimeout(function(){if(!done){done=true;pushDefaultBands()}},600);
+    return function(){clearTimeout(t)}
+  },[]);
   return m("div",{style:{width:"100%",height:"100%",display:"flex",flexDirection:"column"}},
     m("div",{style:{height:36,background:"#0d0f14",borderBottom:"1px solid rgba(255,255,255,.05)",display:"flex",alignItems:"center",padding:"0 12px",gap:8,fontSize:12}},
       m("span",{style:{color:"#eab308",fontWeight:700,letterSpacing:1}},"TOREI-EQ"),m("span",{style:{color:"#555",fontSize:10}},"v1.0-dev"),
@@ -432,7 +502,9 @@ function App(){
     ),
     m(EQCanvas,{store:store,panelOffsets:panelOffsets,setPanelOffset:setPanelOffset}),
     m("div",{style:{height:44,background:"#111318",borderTop:"1px solid rgba(255,255,255,.05)",display:"flex",alignItems:"center",padding:"0 16px",gap:12,color:"#888",fontSize:11}},
-      m("span",null,"OUTPUT 0 dB"),m("div",{style:{flex:1}}),m("span",null,store.B.length+"/24")
+      m("span",null,"OUTPUT"),m(EditableValue,{value:store.outputGain,min:-24,max:24,step:.1,fmt:function(v){return(v>0?"+":"")+v.toFixed(1)+" dB"},style:{color:"#cbd5e1"},onChange:function(v){store.setOutputGain(+v.toFixed(1))}}),
+      m("span",{style:{color:store.listening?"#22d3ee":"#555"}},"SOLO "+(store.selSoloDb>0?"+":"")+store.selSoloDb.toFixed(1)+" dB"),
+      m("div",{style:{flex:1}}),m("span",null,store.B.length+"/24")
     )
   );
 }

@@ -31,8 +31,9 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
+    // Band state is serialised with a ValueTree/XML payload (see the .cpp).
+    void getStateInformation(juce::MemoryBlock& destData) override;
+    void setStateInformation(const void* data, int sizeInBytes) override;
 
     // Spectrum smoothing tuning parameters (exposed to the host for live tweaking).
     juce::AudioParameterFloat* spectrumAttack  = nullptr;  // 0.05..0.95

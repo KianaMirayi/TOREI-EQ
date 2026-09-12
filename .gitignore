@@ -9,6 +9,7 @@ out/
 
 # Debug / temporary test artifacts
 build_log.txt
+build_out.txt
 build_error.log
 eq_debug.txt
 spectrum_debug.txt
@@ -27,6 +28,9 @@ PRDV3_UI.md
 EQ_CURVE_SMOOTHING_FIX.md
 PRE_POST_EQ_HANDOFF.md
 SPECTRUM_MULTI_INSTANCE_FIX.md
+LISTEN_FEATURE_HANDOFF.md
+STATE_PERSISTENCE_HANDOFF.md
+OUTPUT_GAIN_HANDOFF.md
 
 # IDE
 .vs/
