@@ -323,6 +323,7 @@ void ToreiEQAudioProcessorEditor::pushBandState()
         o->setProperty ("freq",   (double) info[i].freq);
         o->setProperty ("gain",   (double) info[i].gain);
         o->setProperty ("q",      (double) info[i].q);
+        o->setProperty ("slope",  info[i].slope);
         o->setProperty ("bypass", info[i].bypass);
         payload.add (juce::var (o.get()));
     }

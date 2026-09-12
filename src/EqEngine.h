@@ -11,6 +11,9 @@ public:
     static constexpr int kMaxBands    = 24;
     static constexpr int kCurvePoints = 512;   // magnitude-response samples for the UI
 
+    // Maximum cascaded sections per band. 48 dB/oct = 4 second-order sections.
+    static constexpr int kMaxCascades = 4;
+
     // Filter types, matching the UI's string identifiers.
     enum Type
     {
@@ -30,8 +33,16 @@ public:
         float freq   = 1000.0f;
         float gain   = 0.0f;
         float q      = 1.0f;
+        int   slope  = 12;      // dB/oct, only meaningful for lowpass/highpass
         bool  bypass = false;
     };
+
+    // Slope values accepted for lowpass/highpass, in dB/oct. Anything else falls
+    // back to 12 (the historical behaviour, one biquad).
+    static int normaliseSlope (int slope);
+    // Number of cascaded sections a band uses: 1 for every non-cut type, and
+    // 1/1/2/4 for lowpass/highpass at 6/12/24/48 dB/oct.
+    static int stageCountFor (Type type, int slope);
 
     void prepare (double sampleRate, int samplesPerBlock);
     void reset();
@@ -123,18 +134,31 @@ private:
         std::atomic<float> freq { 1000.0f };
         std::atomic<float> gain { 0.0f };
         std::atomic<float> q    { 1.0f };
+        std::atomic<int>   slope { 12 };          // dB/oct; lowpass/highpass only
         std::atomic<bool>  occupied { false };   // slot has a live band
         std::atomic<bool>  bypass   { false };
+
+        // How many cascaded sections this band currently uses (mirrors
+        // stageCountFor(type, slope), but published as an atomic so the audio thread
+        // never has to read the non-atomic `type`).
+        std::atomic<int> activeStages { 0 };
     };
 
     void updateCoefficients (int index);
+    void clearBandState (int index);
 
     std::array<Band, kMaxBands> bands;
-    std::array<juce::dsp::IIR::Filter<float>, kMaxBands> filters;
 
-    // Per-band-per-channel biquad state (z1, z2) for the manual real-time-safe
-    // processing in process(). [band][channel][0]=z1, [channel][1]=z2.
-    std::array<std::array<std::array<float, 2>, 2>, kMaxBands> filterState;
+    // Per-band cascaded filter coefficients, one entry per section. Rebuilt on the
+    // message thread and published by pointer swap, exactly like the old
+    // IIR::Filter::coefficients (the audio thread snapshots each Ptr, holding a
+    // reference, so a concurrent swap can never free an object still in use).
+    std::array<std::array<juce::dsp::IIR::Coefficients<float>::Ptr, kMaxCascades>, kMaxBands> coeffs;
+
+    // Per-band-per-section-per-channel direct-form state (z1, z2) for the manual
+    // real-time-safe processing in process().
+    // Indexing: [band][section][channel][0 = z1, 1 = z2].
+    std::array<std::array<std::array<std::array<float, 2>, 2>, kMaxCascades>, kMaxBands> filterState;
 
     // Per-instance listen target (see setListenIndex above).
     std::atomic<int> listenIndex { -1 };
@@ -148,7 +172,7 @@ private:
     // --- Solo audition stage (Pro-Q "solo", §0.10) ---
     // Bandpass coefficients for the listened band, rebuilt on the message thread
     // whenever the listen target or its freq/Q changes. Published by pointer swap,
-    // and snapshotted (reference held) on the audio thread just like `filters`.
+    // and snapshotted (reference held) on the audio thread just like `coeffs`.
     juce::dsp::IIR::Coefficients<float>::Ptr soloCoeffs;
     std::array<std::array<float, 2>, 2> soloState;   // [channel][z1/z2]
 

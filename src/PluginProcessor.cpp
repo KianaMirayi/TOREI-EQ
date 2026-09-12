@@ -200,6 +200,7 @@ void ToreiEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         band.setProperty ("freq",   (double) info[i].freq, nullptr);
         band.setProperty ("gain",   (double) info[i].gain, nullptr);
         band.setProperty ("q",      (double) info[i].q, nullptr);
+        band.setProperty ("slope",  info[i].slope, nullptr);
         band.setProperty ("bypass", info[i].bypass, nullptr);
         root.appendChild (band, nullptr);
     }
@@ -241,6 +242,10 @@ void ToreiEQAudioProcessor::setStateInformation (const void* data, int sizeInByt
                           (float) (double) band.getProperty ("freq", 1000.0),
                           (float) (double) band.getProperty ("gain", 0.0),
                           (float) (double) band.getProperty ("q", 1.0));
+
+        // Slope (dB/oct), only meaningful for lowpass/highpass. Defaults to 12 for
+        // projects saved before this existed.
+        eqEngine.setParam (index, "slope", (int) band.getProperty ("slope", 12));
 
         if ((bool) band.getProperty ("bypass", false))
             eqEngine.setParam (index, "bypass", true);

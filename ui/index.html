@@ -60,10 +60,10 @@ var EQCURVE=new Float32Array(512);var EQCURVE_LEN=0;var SMEQ=new Float32Array(51
 function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('EQ_Curve_Data',function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0});return true}return false}
 function smoothCurve(a,n){if(n<5)return;var p2=a[0],p1=a[0],c=a[0];for(var i=1;i<n-1;i++){var nx1=a[i+1],nx2=(i<n-2)?a[i+2]:a[n-1];a[i]=(p2+4*p1+6*c+4*nx1+nx2)/16;p2=p1;p1=c;c=nx1}}
 function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE2[j]=0}return}var n=EQCURVE_LEN,E=EQCURVE;SMEQ[0]=E[0];SMEQ[n-1]=E[n-1];for(var i=1;i<n-1;i++){var a=E[i-1],b=E[i],c=E[i+1];if((b>=a&&b>=c)||(b<=a&&b<=c))SMEQ[i]=b;else SMEQ[i]=(a+b+c)/3}for(var j=0;j<W;j++){var pos=(j/(W-1))*(n-1),i0=Math.floor(pos),i1=Math.min(n-1,i0+1),t=pos-i0,p0=SMEQ[Math.max(0,i0-1)],p1=SMEQ[i0],p2=SMEQ[i1],p3=SMEQ[Math.min(n-1,i1+1)],t2=t*t,t3=t2*t,v=.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);CURVE[j]=v;CURVE2[j]=v}}
-function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=2+b.slope*2;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
+function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
-  var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0}]);B=_r[0];setB=_r[1];
+  var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0}]);B=_r[0];setB=_r[1];
   _r=useState(null);sel=_r[0];setSel=_r[1];
   // Solo listen level (dB): how loud the soloed band is played back while holding
   // the headphone button. GLOBAL (not per band) and NOT an EQ gain -- it only makes
@@ -90,7 +90,7 @@ function useStore(){
   // the DSP's instead of pushing local defaults at it.
   var replaceBands=function(arr){CURVE_DIRTY=true;setB(arr)};
   var update=function(id,chg){CURVE_DIRTY=true;setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,chg):b})});for(var k in chg)sendParam(id,k,chg[k])};
-  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:1,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
+  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
   var rem=function(id){CURVE_DIRTY=true;setB(function(p){return p.filter(function(b){return b.id!==id})});setSel(function(p){return p===id?null:p});sendCmd("RemoveBand",{index:id})};
   var toggle=function(id){update(id,{active:!B.find(function(b){return b.id===id}).active})};
   var toggleBypass=function(id){update(id,{bypass:!B.find(function(b){return b.id===id}).bypass})};
@@ -229,6 +229,13 @@ function BandTip(p){var b=p.band,store=p.store;var flip=p.y<130;
         m(EditableValue,{value:b.gain,min:-30,max:30,step:.1,fmt:function(v){return(v>0?"+":"")+v.toFixed(2)+" dB"},style:{color:b.gain>=0?"#facc15":"#38bdf8"},onChange:function(v){store.update(b.id,{gain:+v.toFixed(2)})}}),
         m(EditableValue,{value:b.q||1,min:.1,max:40,step:.01,fmt:function(v){return"Q: "+v.toFixed(2)},style:{color:"#94a3b8"},onChange:function(v){store.update(b.id,{q:+v.toFixed(2)})}})
       ),
+      // Slope only means something for the cut filters (SLOPE_HANDOFF.md). Hidden for
+      // peak/shelf types so it cannot mislead.
+      (b.type==="lowpass"||b.type==="highpass")?m("div",{style:{display:"flex",alignItems:"center",gap:6,padding:"0 2px",fontSize:9,color:"#94a3b8"}},
+        m("span",{style:{letterSpacing:.5,opacity:.75}},"SLOPE"),
+        m("div",{style:{display:"flex",gap:3,flex:1}},
+          [6,12,24,48].map(function(sv){var on=(b.slope||12)===sv;return m("button",{key:sv,style:{flex:1,padding:"2px 0",borderRadius:4,border:"1px solid "+(on?"rgba(34,211,238,.55)":"rgba(100,116,139,.3)"),background:on?"rgba(34,211,238,.16)":"rgba(255,255,255,.02)",color:on?"#22d3ee":"#94a3b8",fontSize:9,cursor:"pointer",fontVariantNumeric:"tabular-nums"},onPointerDown:stopE,onClick:function(e){e.stopPropagation();store.update(b.id,{slope:sv})}},sv)})),
+      ):null,
       m("div",{style:flip?{position:"absolute",bottom:"100%",left:"50%",transform:"translateX(-50%)",width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:"6px solid #2a2d36"}:{position:"absolute",top:"100%",left:"50%",transform:"translateX(-50%)",width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderTop:"6px solid #2a2d36"}})
     )
   );
@@ -482,7 +489,7 @@ function App(){
       if(done)return;done=true;
       var out=[];
       if(arr&&arr.length)for(var i=0;i<arr.length;i++){var s=arr[i]||{};if(typeof s.index!=="number")continue;
-        out.push({id:s.index,type:s.type||"peaking",freq:+s.freq||1000,gain:+s.gain||0,q:+s.q||1,slope:1,active:true,mute:false,solo:false,bypass:!!s.bypass,mode:s.mode||"stereo",soloDb:0})}
+        out.push({id:s.index,type:s.type||"peaking",freq:+s.freq||1000,gain:+s.gain||0,q:+s.q||1,slope:12,active:true,mute:false,solo:false,bypass:!!s.bypass,mode:s.mode||"stereo",soloDb:0})}
       out.sort(function(a,b){return a.id-b.id});
       store.replaceBands(out)
     };
