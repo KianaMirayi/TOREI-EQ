@@ -204,20 +204,21 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         webView->emitEventIfBrowserIsVisible ("Spectrum_Data_Post", spectrumPostPayload);
     }
 
-    // Push the EQ magnitude response (dB, log-spaced 20 Hz..20 kHz) to the UI.
-    if (curveScratch == nullptr)
-        curveScratch.calloc (EqEngine::kCurvePoints);
-
-    const int curvePoints = processorRef.getEqEngine().getCurveGains (curveScratch.getData(),
-                                                                      EqEngine::kCurvePoints);
-
-    curvePayload.clearQuick();
-    curvePayload.ensureStorageAllocated (curvePoints);
-
-    for (int i = 0; i < curvePoints; ++i)
-        curvePayload.add (juce::var ((double) std::round (curveScratch[i] * 10.0f) * 0.1f));
-
-    webView->emitEventIfBrowserIsVisible ("EQ_Curve_Data", curvePayload);
+    // Push the EQ magnitude response curves (dB, log-spaced 20 Hz..20 kHz).
+    //
+    // Four per-channel-mode groups (MID_SIDE_HANDOFF.md §5), each = stereo bands plus
+    // the bands routed to that channel. `EQ_Curve_Data` is the legacy name and is sent
+    // with the SAME data as `EQ_Curve_Data_Mid`: the UI binds both names to its Mid
+    // slot, so keeping them identical makes the displayed result independent of which
+    // arrives last (agreed as option 2-1).
+    //
+    // When no band is routed to mid/side the Mid and Side arrays are identical, and the
+    // UI's own merge logic collapses them into a single line (acceptance §8.1).
+    pushCurve ("EQ_Curve_Data",      EqEngine::curveMid);
+    pushCurve ("EQ_Curve_Data_Mid",  EqEngine::curveMid);
+    pushCurve ("EQ_Curve_Data_Side", EqEngine::curveSide);
+    pushCurve ("EQ_Curve_Data_L",    EqEngine::curveLeft);
+    pushCurve ("EQ_Curve_Data_R",    EqEngine::curveRight);
 
     // Push the listen state (hold-to-listen target band, -1 = none) whenever it
     // changes. Change-detection rather than every frame: it keeps the bridge quiet
@@ -240,21 +241,175 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         }
     }
 
+    // Curve logging / diagnostics live in pushCurve() (it owns the scratch buffer).
+
+#if TOREI_EQ_DEBUG_LOG
+    logMsDiagnostics();
+#endif
+}
+
+#if TOREI_EQ_DEBUG_LOG
+void ToreiEQAudioProcessorEditor::logMsDiagnostics()
+{
+    EqEngine& engine = processorRef.getEqEngine();
+
+    const juce::uint32 now = juce::Time::getMillisecondCounter();
+
+    // (2) LANES -- once, ~300 ms after a mode change, so we report the CONVERGED ramp
+    // values rather than a mid-transition snapshot.
+    //
+    // Deliberately NOT gated on "is anything still routed": the case that matters most
+    // is the LAST band going back to stereo, which by definition leaves nothing routed.
+    // Gating here would silently swallow exactly that line (§16.4). This is a one-shot
+    // response to a mode-change event, not periodic traffic, so it needs no gate.
+    if (pendingLanesBand >= 0 && now >= pendingLanesAtMs)
     {
-        static bool curveLoggedOnce = false;
+        const int b = pendingLanesBand;
+        pendingLanesBand = -1;
+
+        const auto fmtMix = [] (float v)
+        {
+            return juce::String (v, 3);
+        };
+
+        logEq ("LANES band=" + juce::String (b)
+               + " mode=" + juce::String (EqEngine::modeToString (engine.getBandMode (b)))
+               + " cL=" + fmtMix (engine.getLaneMix (b, EqEngine::laneL))
+               + " cR=" + fmtMix (engine.getLaneMix (b, EqEngine::laneR))
+               + " cM=" + fmtMix (engine.getLaneMix (b, EqEngine::laneM))
+               + " cS=" + fmtMix (engine.getLaneMix (b, EqEngine::laneS)));
+    }
+
+    // `ENGINE after setParam` is throttled (~500 ms) instead of being logged per change:
+    // a node drag fires it at ~40 Hz and each line dumps every band's full state, which
+    // is what took the log to 21 MB (§15.2). Throttling still reports the evolving values
+    // and, because the pending flag survives, also lands one final line after the drag
+    // stops -- so the settled state is never lost.
+    if (pendingEngineLog && now - lastEngineLogMs >= kEngineLogIntervalMs)
+    {
+        pendingEngineLog = false;
+        lastEngineLogMs  = now;
+
+        logEq ("ENGINE after setParam  " + engine.describe());
+    }
+
+    // Everything below is periodic M/S probing, which only means anything while a band
+    // is actually routed away from stereo -- so the common all-stereo case stays silent
+    // (§13.4).
+    if (engine.getFirstNonStereoBand() < 0)
+        return;
+
+    if (now - lastMsProbeMs < 500)
+        return;
+
+    lastMsProbeMs = now;
+
+    const auto fmtDb = [] (float v)
+    {
+        return juce::String (v, 1);
+    };
+
+    // (3) MSPROBE -- the numeric substitute for "the ear cannot tell".
+    // NOTE: in/out are measured across the WHOLE EQ chain, not per band (measuring per
+    // band would mean a second RMS pass for every band). With a single routed band --
+    // the test case in §13.5 -- the chain in/out IS that band's effect.
+    //
+    // ALL routed bands are listed, not just the first: reporting only the first meant a
+    // second routed band (e.g. a `side` band behind a `mid` one) never appeared at all,
+    // and `side` is precisely the case that most needs numeric evidence (§16.3).
+    int routed[EqEngine::kMaxBands];
+    const int routedCount = engine.getRoutedBands (routed, EqEngine::kMaxBands);
+
+    juce::String routedDesc;
+
+    for (int i = 0; i < routedCount; ++i)
+        routedDesc << (i > 0 ? " " : "")
+                   << "band" << routed[i] << ":"
+                   << EqEngine::modeToString (engine.getBandMode (routed[i]));
+
+    logEq ("MSPROBE routed=[" + routedDesc + "]"
+           + "  (whole chain)"
+           + "  in: L=" + fmtDb (engine.getProbeDb (false, EqEngine::probeL))
+           + " R="      + fmtDb (engine.getProbeDb (false, EqEngine::probeR))
+           + " M="      + fmtDb (engine.getProbeDb (false, EqEngine::probeM))
+           + " S="      + fmtDb (engine.getProbeDb (false, EqEngine::probeS))
+           + " | out: L=" + fmtDb (engine.getProbeDb (true, EqEngine::probeL))
+           + " R="        + fmtDb (engine.getProbeDb (true, EqEngine::probeR))
+           + " M="        + fmtDb (engine.getProbeDb (true, EqEngine::probeM))
+           + " S="        + fmtDb (engine.getProbeDb (true, EqEngine::probeS)));
+
+    // (4) curve-group confirmation: the four groups must NOT all be the same array.
+    const auto fmtPeak = [this] (EqEngine::CurveGroup g)
+    {
+        return "peak=" + juce::String (curvePeakDb[g] >= 0.0f ? "+" : "")
+                        + juce::String (curvePeakDb[g], 1) + "dB@"
+                        + juce::String (juce::roundToInt (curvePeakFreq[g])) + "Hz";
+    };
+
+    logEq (juce::String ("CURVE mid: ") + fmtPeak (EqEngine::curveMid)
+           + "   side: " + fmtPeak (EqEngine::curveSide));
+    logEq (juce::String ("CURVE L:   ") + fmtPeak (EqEngine::curveLeft)
+           + "   R:    " + fmtPeak (EqEngine::curveRight));
+}
+#endif   // TOREI_EQ_DEBUG_LOG
+
+void ToreiEQAudioProcessorEditor::pushCurve (const char* eventName, EqEngine::CurveGroup group)
+{
+    if (webView == nullptr)
+        return;
+
+    if (curveScratch == nullptr)
+        curveScratch.calloc (EqEngine::kCurvePoints);
+
+    const int curvePoints = processorRef.getEqEngine().getCurveGains (curveScratch.getData(),
+                                                                      EqEngine::kCurvePoints,
+                                                                      group);
+
+    if (curvePoints <= 0)
+        return;
+
+    // Reuse the one payload buffer: the events are emitted back to back.
+    curvePayload.clearQuick();
+    curvePayload.ensureStorageAllocated (curvePoints);
+
+    for (int i = 0; i < curvePoints; ++i)
+        curvePayload.add (juce::var ((double) std::round (curveScratch[i] * 10.0f) * 0.1f));
+
+    webView->emitEventIfBrowserIsVisible (eventName, curvePayload);
+
+#if TOREI_EQ_DEBUG_LOG
+    // Record this group's peak for the §13.3(4) curve-group log. All five events share
+    // the same band set, so one frame's worth of peaks is logged together below.
+    {
+        int peakIndex = 0;
+
+        for (int i = 1; i < curvePoints; ++i)
+            if (curveScratch[i] > curveScratch[peakIndex])
+                peakIndex = i;
+
+        if (group >= 0 && group < kNumCurveGroups)
+        {
+            curvePeakDb[group]   = curveScratch[peakIndex];
+            curvePeakFreq[group] = (float) (20.0 * std::pow (10.0,
+                                       (double) peakIndex / (double) (curvePoints - 1) * 3.0));
+        }
+    }
+#endif
+
+    // Diagnostics run once per frame, on the Mid group only (all five events share the
+    // same band set, so reporting one is enough). Members, not statics: a function-local
+    // static would be shared by every editor instance.
+    if (group == EqEngine::curveMid)
+    {
         if (! curveLoggedOnce)
         {
             curveLoggedOnce = true;
             logEq ("SEND EQ_Curve_Data  points=" + juce::String (curvePoints)
                    + "  firstGain=" + juce::String (curveScratch[0]));
         }
-    }
 
-    // Periodic curve diagnostic: report the computed curve's min/max dB so we can
-    // confirm getCurveGains actually reflects the band boosts (every ~5 s).
-    {
-        static int curveDiagTick = 0;
-        if ((++curveDiagTick % 200) == 0 && curvePoints > 0)
+#if TOREI_EQ_DEBUG_LOG
+        if ((++curveDiagTick % 200) == 0)
         {
             float mx = curveScratch[0], mn = curveScratch[0];
             for (int i = 1; i < curvePoints; ++i)
@@ -266,6 +421,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
                    + "  minDb=" + juce::String (mn)
                    + "   [engine] " + processorRef.getEqEngine().describe());
         }
+#endif
     }
 }
 
@@ -281,7 +437,29 @@ void ToreiEQAudioProcessorEditor::handleParameterChange (const juce::var& object
                + "  param=" + param + "  value=" + value.toString());
 
         processorRef.getEqEngine().setParam (index, param, value);
-        logEq ("ENGINE after setParam  " + processorRef.getEqEngine().describe());
+
+#if TOREI_EQ_DEBUG_LOG
+        // NOT logged here: a node drag fires this at ~40 Hz and describe() dumps every
+        // band, which is what inflated the log to 21 MB (§15.2). The throttled logger in
+        // logMsDiagnostics() emits it at most every 500 ms, plus once after the last
+        // change, so the settled state still gets recorded.
+        pendingEngineLog = true;
+
+        // §13.3(1): explicit acknowledgement that C++ actually received the mode (as
+        // opposed to silently dropping it), plus a sample of the lane ramps ~300 ms
+        // later once they have converged onto the new target.
+        if (param == "mode")
+        {
+            const auto newMode = processorRef.getEqEngine().getBandMode (index);
+
+            logEq ("ENGINE setParam band=" + juce::String (index)
+                   + " param=mode value=" + value.toString()
+                   + " -> " + juce::String (EqEngine::modeToString (newMode)));
+
+            pendingLanesBand = index;
+            pendingLanesAtMs = juce::Time::getMillisecondCounter() + 300;
+        }
+#endif
 
         // `listen` / `soloLevel` are transient audition state and are deliberately
         // NOT saved, so they must not mark the project as modified either.
@@ -324,6 +502,7 @@ void ToreiEQAudioProcessorEditor::pushBandState()
         o->setProperty ("gain",   (double) info[i].gain);
         o->setProperty ("q",      (double) info[i].q);
         o->setProperty ("slope",  info[i].slope);
+        o->setProperty ("mode",   juce::String (EqEngine::modeToString (info[i].mode)));
         o->setProperty ("bypass", info[i].bypass);
         payload.add (juce::var (o.get()));
     }
@@ -368,7 +547,14 @@ void ToreiEQAudioProcessorEditor::handleCommand (const juce::var& object)
                    + "  gain=" + juce::String (gain) + "  q=" + juce::String (q));
 
             processorRef.getEqEngine().addBand (index, EqEngine::typeFromString (type), freq, gain, q);
+
+#if TOREI_EQ_DEBUG_LOG
+            // Same class as `ENGINE after setParam`: a full-band describe() line. Low
+            // frequency (only when a band is created), but gated for consistency and to
+            // avoid pointless long lines (§21.3).
             logEq ("ENGINE after addBand  " + processorRef.getEqEngine().describe());
+#endif
+
             notifyHostStateChanged();
         }
         else if (cmd == "RemoveBand")
@@ -376,7 +562,11 @@ void ToreiEQAudioProcessorEditor::handleCommand (const juce::var& object)
             const int index = (int) (double) d->getProperty ("index");
             logEq ("RECV Command RemoveBand  index=" + juce::String (index));
             processorRef.getEqEngine().removeBand (index);
+
+#if TOREI_EQ_DEBUG_LOG
             logEq ("ENGINE after removeBand  " + processorRef.getEqEngine().describe());
+#endif
+
             notifyHostStateChanged();
         }
         else if (cmd == "Request_State")

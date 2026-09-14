@@ -42,6 +42,17 @@ private:
     // reopen. Sent alongside Band_State, but as an independent event.
     void pushOutputState();
 
+    // Pushes one curve group (Mid/Side/L/R). Shared by all EQ_Curve_Data* events.
+    void pushCurve (const char* eventName, EqEngine::CurveGroup group);
+
+    // M/S runtime diagnostics (MID_SIDE_HANDOFF.md §13). All of it runs on the message
+    // thread; the audio thread only publishes atomics. Compiled only when
+    // TOREI_EQ_DEBUG_LOG is 1 -- the M/S verification is complete (§18), so a normal
+    // build produces none of this traffic (§19).
+#if TOREI_EQ_DEBUG_LOG
+    void logMsDiagnostics();
+#endif
+
     // Tells the host the project is modified. Must pass
     // nonParameterStateChanged = true: a bare updateHostDisplay() sends an all-false
     // ChangeDetails, which the VST3 wrapper collapses to a no-op (no setDirty).
@@ -67,6 +78,33 @@ private:
     int lastPushedListenIndex = -2;            // -2 = nothing pushed yet
 
     juce::DynamicObject::Ptr outputStateObj;   // reused across frames (Output_State)
+
+    // Curve log throttle. A member rather than a function-local static (a static would
+    // be shared by every editor instance). This one-shot line is kept in normal builds.
+    bool curveLoggedOnce = false;
+
+#if TOREI_EQ_DEBUG_LOG
+    // --- Diagnostic-only state (MID_SIDE_HANDOFF.md §13; gated per §19) ------------
+    // Everything below exists solely to feed the temporary diagnostics, so it is
+    // compiled out of a normal build along with the passes that fill it.
+    int  curveDiagTick   = 0;
+
+    // Peak dB / peak frequency of each curve group, indexed by EqEngine::CurveGroup.
+    static constexpr int kNumCurveGroups = 5;
+    float        curvePeakDb[kNumCurveGroups]   = {};
+    float        curvePeakFreq[kNumCurveGroups] = {};
+
+    int          pendingLanesBand = -1;          // band awaiting its post-change LANES log
+    juce::uint32 pendingLanesAtMs = 0;
+    juce::uint32 lastMsProbeMs    = 0;
+
+    // `ENGINE after setParam` is deferred to the timer and throttled (§15.2). The flag
+    // stays set until it has been emitted, so one final line always lands once a drag
+    // stops -- the settled state is never lost.
+    bool         pendingEngineLog = false;
+    juce::uint32 lastEngineLogMs  = 0;
+    static constexpr juce::uint32 kEngineLogIntervalMs = 500;
+#endif
 
     bool pageLoaded = false;
 

@@ -57,9 +57,17 @@ function bridgeReadyNow(){return typeof __JUCE__!=='undefined'&&__JUCE__&&__JUCE
 function whenBridgeReady(cb){if(bridgeReadyNow()){cb(true);return}var tries=0;var iv=setInterval(function(){tries++;if(bridgeReadyNow()){clearInterval(iv);cb(true);return}if(tries>100){clearInterval(iv);cb(false)}},100)}
 // C++ -> UI：EQ 幅频响应曲线（dB，对数 20Hz..20kHz）
 var EQCURVE=new Float32Array(512);var EQCURVE_LEN=0;var SMEQ=new Float32Array(512);
-function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){__JUCE__.backend.addEventListener('EQ_Curve_Data',function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0});return true}return false}
+// Side curve kept separately from Mid (M/S processing, see MID_SIDE_HANDOFF.md).
+// Until C++ pushes the Side event, HAS_MS_CURVE stays false and the UI falls back to
+// "both curves identical" = exactly the behaviour before M/S existed.
+var EQCURVE_S=new Float32Array(512);var EQCURVE_LEN_S=0;var HAS_MS_CURVE=false;
+// L/R 通道曲线（与 M/S 同构）。C++ 未推 L/R 事件时 HAS_LR_CURVE=false，退回单曲线行为。
+var EQCURVE_L=new Float32Array(512);var EQCURVE_LEN_L=0;var EQCURVE_R=new Float32Array(512);var EQCURVE_LEN_R=0;var HAS_LR_CURVE=false;
+function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){var takeM=function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0};var takeS=function(data){var n=Math.min(data.length,EQCURVE_S.length);EQCURVE_LEN_S=n;HAS_MS_CURVE=true;for(var i=0;i<n;i++)EQCURVE_S[i]=data[i]||0};var takeL=function(data){var n=Math.min(data.length,EQCURVE_L.length);EQCURVE_LEN_L=n;HAS_LR_CURVE=true;for(var i=0;i<n;i++)EQCURVE_L[i]=data[i]||0};var takeR=function(data){var n=Math.min(data.length,EQCURVE_R.length);EQCURVE_LEN_R=n;HAS_LR_CURVE=true;for(var i=0;i<n;i++)EQCURVE_R[i]=data[i]||0};__JUCE__.backend.addEventListener('EQ_Curve_Data',takeM);__JUCE__.backend.addEventListener('EQ_Curve_Data_Mid',takeM);__JUCE__.backend.addEventListener('EQ_Curve_Data_Side',takeS);__JUCE__.backend.addEventListener('EQ_Curve_Data_L',takeL);__JUCE__.backend.addEventListener('EQ_Curve_Data_R',takeR);return true}return false}
 function smoothCurve(a,n){if(n<5)return;var p2=a[0],p1=a[0],c=a[0];for(var i=1;i<n-1;i++){var nx1=a[i+1],nx2=(i<n-2)?a[i+2]:a[n-1];a[i]=(p2+4*p1+6*c+4*nx1+nx2)/16;p2=p1;p1=c;c=nx1}}
-function applyEqCurve(W){if(EQCURVE_LEN<2){for(var j=0;j<W;j++){CURVE[j]=0;CURVE2[j]=0}return}var n=EQCURVE_LEN,E=EQCURVE;SMEQ[0]=E[0];SMEQ[n-1]=E[n-1];for(var i=1;i<n-1;i++){var a=E[i-1],b=E[i],c=E[i+1];if((b>=a&&b>=c)||(b<=a&&b<=c))SMEQ[i]=b;else SMEQ[i]=(a+b+c)/3}for(var j=0;j<W;j++){var pos=(j/(W-1))*(n-1),i0=Math.floor(pos),i1=Math.min(n-1,i0+1),t=pos-i0,p0=SMEQ[Math.max(0,i0-1)],p1=SMEQ[i0],p2=SMEQ[i1],p3=SMEQ[Math.min(n-1,i1+1)],t2=t*t,t3=t2*t,v=.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);CURVE[j]=v;CURVE2[j]=v}}
+function expandCurve(src,n,dst,W){if(n<2){for(var j=0;j<W;j++)dst[j]=0;return}SMEQ[0]=src[0];SMEQ[n-1]=src[n-1];for(var i=1;i<n-1;i++){var a=src[i-1],b=src[i],c=src[i+1];if((b>=a&&b>=c)||(b<=a&&b<=c))SMEQ[i]=b;else SMEQ[i]=(a+b+c)/3}for(var j=0;j<W;j++){var pos=(j/(W-1))*(n-1),i0=Math.floor(pos),i1=Math.min(n-1,i0+1),t=pos-i0,p0=SMEQ[Math.max(0,i0-1)],p1=SMEQ[i0],p2=SMEQ[i1],p3=SMEQ[Math.min(n-1,i1+1)],t2=t*t,t3=t2*t;dst[j]=.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3)}}
+// useLR=true 时用 L/R 组曲线（橙/紫），否则用 M/S 组（绿/蓝）。该组无数据时退回"两条相同"= 单曲线。
+function applyEqCurve(W,useLR){var A=useLR?EQCURVE_L:EQCURVE,AL=useLR?EQCURVE_LEN_L:EQCURVE_LEN,Bc=useLR?EQCURVE_R:EQCURVE_S,BL=useLR?EQCURVE_LEN_R:EQCURVE_LEN_S,hasB=useLR?HAS_LR_CURVE:HAS_MS_CURVE;expandCurve(A,AL,CURVE,W);if(hasB)expandCurve(Bc,BL,CURVE2,W);else for(var j=0;j<W;j++)CURVE2[j]=CURVE[j]}
 function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
@@ -140,11 +148,14 @@ function TrashIcon(p){var s=p.size||12;return m("svg",{width:s,height:s,viewBox:
 function ChevronIcon(p){var s=p.size||10,d=p.dir==="left"?"M15 5l-7 7 7 7":p.dir==="right"?"M9 5l7 7-7 7":"M6 9l6 6 6-6";return m("svg",{width:s,height:s,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2.5,strokeLinecap:"round",strokeLinejoin:"round",style:{display:"block"}},m("path",{d:d}))}
 function HeadphoneIcon(p){var s=p.size||12;return m("svg",{width:s,height:s,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",strokeLinejoin:"round",style:{display:"block"}},m("path",{d:"M4 15v-3a8 8 0 0 1 16 0v3"}),m("rect",{x:3,y:14,width:4,height:6,rx:1.5}),m("rect",{x:17,y:14,width:4,height:6,rx:1.5}))}
 
-var MS_COLORS={stereo:"#eab308",mid:"#22c55e",side:"#38bdf8"};
+var MS_COLORS={stereo:"#eab308",L:"#f97316",R:"#a855f7",mid:"#22c55e",side:"#38bdf8"};
+var MS_NAME=function(md){return md==="stereo"?"Stereo":md==="L"?"L":md==="R"?"R":md==="mid"?"Mid":"Side"};
 function MSIcon(p){var md=p.mode||"stereo",s=p.size||14,c=p.color||MS_COLORS[md];
   var cA=function(cx){return m("circle",{cx:cx,cy:6,r:4.6,fill:"none",stroke:c,strokeWidth:1.5})};
   if(md==="mid")return m("svg",{width:s,height:s,viewBox:"0 0 24 12",style:{display:"block"}},cA(9.5),cA(14.5),m("circle",{cx:12,cy:6,r:2.2,fill:c}));
   if(md==="side")return m("svg",{width:s,height:s,viewBox:"0 0 24 12",style:{display:"block"}},m("path",{d:"M9.5 1.4 a4.6 4.6 0 1 0 0 9.2 a4.6 4.6 0 1 0 0 -9.2 M14.5 1.4 a4.6 4.6 0 1 0 0 9.2 a4.6 4.6 0 1 0 0 -9.2",fill:c,fillRule:"evenodd",stroke:"none"}));
+  if(md==="L")return m("svg",{width:s,height:s,viewBox:"0 0 24 12",style:{display:"block"}},m("circle",{cx:9.5,cy:6,r:4.6,fill:c}),m("circle",{cx:14.5,cy:6,r:4.6,fill:"none",stroke:"#475569",strokeWidth:1.2}));
+  if(md==="R")return m("svg",{width:s,height:s,viewBox:"0 0 24 12",style:{display:"block"}},m("circle",{cx:9.5,cy:6,r:4.6,fill:"none",stroke:"#475569",strokeWidth:1.2}),m("circle",{cx:14.5,cy:6,r:4.6,fill:c}));
   return m("svg",{width:s,height:s,viewBox:"0 0 24 12",style:{display:"block"}},cA(9.5),cA(14.5));
 }
 
@@ -288,15 +299,15 @@ function BandPanel(p){var b=p.band,store=p.store,dims=p.dims,offset=p.offset,set
         m("div",{style:{position:"relative"}},
           m("button",{style:{display:"flex",alignItems:"center",gap:5,background:"#1e2027",border:"1px solid #2a2d36",borderRadius:999,padding:"3px 8px",cursor:"pointer",color:"#cbd5e1",fontSize:10,fontWeight:500,fontFamily:"inherit"},onClick:function(e){e.stopPropagation();setOpenMS(!openMS)}},
             m(MSIcon,{mode:b.mode,size:12,color:MS_COLORS[b.mode]}),
-            m("span",{style:{color:MS_COLORS[b.mode],fontWeight:600}},b.mode==="stereo"?"Stereo":b.mode==="mid"?"Mid":"Side"),
+            m("span",{style:{color:MS_COLORS[b.mode],fontWeight:600}},MS_NAME(b.mode)),
             m("span",{style:{opacity:.5,display:"flex",marginLeft:2}},m(ChevronIcon,{size:8,dir:"down"}))
           ),
           openMS?m("div",{className:"tdropanim",style:{position:"absolute",right:0,bottom:"100%",marginBottom:4,background:"#1e2027",border:"1px solid #2a2d36",borderRadius:10,boxShadow:"0 10px 24px rgba(0,0,0,.5)",zIndex:70,padding:4,display:"flex",flexDirection:"column",gap:1,minWidth:110}},
-            ["stereo","mid","side"].map(function(md){var act=b.mode===md,mc=MS_COLORS[md];
+            ["stereo","L","R","mid","side"].map(function(md){var act=b.mode===md,mc=MS_COLORS[md];
               return m("button",{key:md,style:{display:"flex",alignItems:"center",gap:6,textAlign:"left",padding:"6px 8px",fontSize:10,fontWeight:500,borderRadius:6,border:"none",cursor:"pointer",background:act?"#252830":"transparent",color:act?"#fff":"#94a3b8",fontFamily:"inherit"},onClick:function(e){e.stopPropagation();store.update(b.id,{mode:md});setOpenMS(false)}},
                 m(MSIcon,{mode:md,size:12,color:act?mc:"#64748b"}),
                 m("span",{style:{width:6,height:6,borderRadius:"50%",background:mc,flexShrink:0}}),
-                md==="stereo"?"Stereo":md==="mid"?"Mid":"Side")
+                MS_NAME(md))
             })
           ):null
         )
@@ -392,7 +403,11 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
   for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
   ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.stroke();
-  if(EQCURVE_LEN>0)applyEqCurve(W);else if(CURVE_DIRTY)mockCurve(b,W);
+  // 决定显示哪一组通道曲线：选中节点属 L/R 组 → L/R；否则若存在 L/R band 且无 M/S band → L/R；否则 M/S
+  var _msC=0,_lrC=0,_q;for(_q=0;_q<b.length;_q++){var _m=b[_q].mode;if(_m==="mid"||_m==="side")_msC++;else if(_m==="L"||_m==="R")_lrC++}
+  var _sb=null;for(_q=0;_q<b.length;_q++)if(b[_q].id===store.sel)_sb=b[_q];
+  var useLR=!!((_sb&&(_sb.mode==="L"||_sb.mode==="R"))||(_lrC>0&&_msC===0));
+  if(useLR&&HAS_LR_CURVE)applyEqCurve(W,true);else if(EQCURVE_LEN>0)applyEqCurve(W,false);else if(CURVE_DIRTY)mockCurve(b,W);
   smoothCurve(CURVE,W);smoothCurve(CURVE2,W);
   // Detect M/S split
   var split=false;
@@ -404,14 +419,14 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     ctx.globalAlpha=1;ctx.lineWidth=1.2;ctx.strokeStyle="rgba(255,229,185,.95)";trace(CURVE);
   }else{
     var fM=1,fS=1;
-    if(selB2){if(selB2.mode==="mid"){fM=1;fS=.25}else if(selB2.mode==="side"){fM=.25;fS=1}}
+    if(selB2){if(selB2.mode==="mid"){fM=1;fS=.25}else if(selB2.mode==="side"){fM=.25;fS=1}else if(selB2.mode==="L"){fM=1;fS=.25}else if(selB2.mode==="R"){fM=.25;fS=1}}
     // Per-pixel Delta Fusion gradient (green/blue fade to yellow where curves merge)
     var MERGE=Math.max(2,H*.008);
     var mkGrad=function(base){var g=ctx.createLinearGradient(0,0,W,0),st=4;g.addColorStop(0,"rgb("+base+")");
       for(var x=st;x<W;x+=st){var md=1e9,xx;for(xx=Math.max(0,x-3);xx<=Math.min(W-1,x+3);xx++){var ddx=Math.abs(g2y(CURVE[xx])*H-g2y(CURVE2[xx])*H);if(ddx<md)md=ddx}var t=Math.min(1,md/MERGE),cv=base.split(",");
         g.addColorStop(x/W,"rgb("+Math.round(255+(+cv[0]-255)*t)+","+Math.round(229+(+cv[1]-229)*t)+","+Math.round(185+(+cv[2]-185)*t)+")")}
       return g};
-    var gS=mkGrad("56,189,248"),gM=mkGrad("34,197,94");
+    var gS=mkGrad(useLR?"168,85,247":"56,189,248"),gM=mkGrad(useLR?"249,115,22":"34,197,94");
     // Side curve: glow (width*2.5, alpha*0.25) then core — bottom layer
     ctx.globalAlpha=fS*.25;ctx.lineWidth=fS>.9?3.5:2.5;ctx.strokeStyle=gS;trace(CURVE2);
     ctx.globalAlpha=fS;ctx.lineWidth=fS>.9?1.4:1.0;ctx.strokeStyle=gS;trace(CURVE2);
@@ -489,7 +504,7 @@ function App(){
       if(done)return;done=true;
       var out=[];
       if(arr&&arr.length)for(var i=0;i<arr.length;i++){var s=arr[i]||{};if(typeof s.index!=="number")continue;
-        out.push({id:s.index,type:s.type||"peaking",freq:+s.freq||1000,gain:+s.gain||0,q:+s.q||1,slope:12,active:true,mute:false,solo:false,bypass:!!s.bypass,mode:s.mode||"stereo",soloDb:0})}
+        out.push({id:s.index,type:s.type||"peaking",freq:+s.freq||1000,gain:+s.gain||0,q:+s.q||1,slope:+(s.slope||12),active:true,mute:false,solo:false,bypass:!!s.bypass,mode:s.mode||"stereo",soloDb:0})}
       out.sort(function(a,b){return a.id-b.id});
       store.replaceBands(out)
     };

@@ -2,6 +2,8 @@
 #include <JuceHeader.h>
 #include <array>
 
+#include "EqConfig.h"   // TOREI_EQ_DEBUG_LOG (diagnostic-gating switch)
+
 // Static EQ engine: up to 24 bands, each a biquad (RBJ) filter. Band parameters
 // are updated on the message thread (from the WebView UI) and applied on the
 // audio thread via the JUCE IIR::Filter coefficient pointer swap (real-time safe).
@@ -14,6 +16,12 @@ public:
     // Maximum cascaded sections per band. 48 dB/oct = 4 second-order sections.
     static constexpr int kMaxCascades = 4;
 
+    // Per-band channel routing (MID_SIDE_HANDOFF.md). A band may act on the L/R pair
+    // or on the M/S pair, so four filter lanes are maintained per band:
+    //   0 = L, 1 = R, 2 = Mid, 3 = Side
+    static constexpr int kNumLanes = 4;
+    enum Lane { laneL = 0, laneR = 1, laneM = 2, laneS = 3 };
+
     // Filter types, matching the UI's string identifiers.
     enum Type
     {
@@ -22,6 +30,32 @@ public:
         highshelf,
         lowpass,
         highpass
+    };
+
+    // Per-band channel mode, matching the UI's identifiers exactly.
+    enum Mode
+    {
+        modeStereo = 0,   // "stereo"  - both channels (historical behaviour)
+        modeLeft,         // "L"
+        modeRight,        // "R"
+        modeMid,          // "mid"
+        modeSide          // "side"
+    };
+
+    // Deep/odd spellings tolerated on input; anything unknown falls back to stereo.
+    static Mode modeFromString (const juce::String& s);
+    // Round-trips with modeFromString: "stereo" / "L" / "R" / "mid" / "side".
+    static const char* modeToString (Mode m);
+
+    // Which bands contribute to a curve (MID_SIDE_HANDOFF.md §5). `stereo` bands
+    // count towards every group, because they act on all channels.
+    enum CurveGroup
+    {
+        curveAll = 0,   // every band (legacy EQ_Curve_Data semantics)
+        curveMid,       // stereo + mid
+        curveSide,      // stereo + side
+        curveLeft,      // stereo + L
+        curveRight      // stereo + R
     };
 
     // Plain (non-atomic) copy of one band's state, used to hand the whole EQ to the
@@ -34,6 +68,7 @@ public:
         float gain   = 0.0f;
         float q      = 1.0f;
         int   slope  = 12;      // dB/oct, only meaningful for lowpass/highpass
+        Mode  mode   = modeStereo;
         bool  bypass = false;
     };
 
@@ -53,16 +88,18 @@ public:
     void removeBand (int index);
 
     // Sets a single parameter. `param` is one of: "freq", "gain", "q", "type",
-    // "bypass". `value` may be a number, bool, or string (for "type").
+    // "slope", "mode", "bypass". `value` may be a number, bool, or string (for
+    // "type" and "mode").
     void setParam (int index, const juce::String& param, const juce::var& value);
 
     // --- Audio-thread API ---
     void process (juce::AudioBuffer<float>& buffer);
 
     // --- Curve (message thread) ---
-    // Fills `gains` with the total EQ magnitude response in dB at `maxPoints`
-    // log-spaced frequencies from 20 Hz to 20 kHz. Returns the number written.
-    int getCurveGains (float* gains, int maxPoints) const;
+    // Fills `gains` with the EQ magnitude response in dB at `maxPoints` log-spaced
+    // frequencies from 20 Hz to 20 kHz, summing the bands that belong to `group`.
+    // Returns the number written.
+    int getCurveGains (float* gains, int maxPoints, CurveGroup group = curveAll) const;
 
     // --- Listen / hold-to-listen (message thread sets, audio thread reads) ---
     // `-1` = no listen; otherwise the slot of the single listened band.
@@ -100,6 +137,39 @@ public:
 
     static Type typeFromString (const juce::String& s);
 
+    // --- M/S runtime probe (MID_SIDE_HANDOFF.md §13) ---
+    // Compiled ONLY when TOREI_EQ_DEBUG_LOG is 1 (see EqConfig.h). It exists purely to
+    // produce numeric evidence for the M/S verification round, which is now complete
+    // (§18), so in a normal build this API and ALL of its supporting state compile away
+    // -- no probe passes, no atomics, no log traffic (§19).
+#if TOREI_EQ_DEBUG_LOG
+    enum ProbeChannel { probeL = 0, probeR, probeM, probeS };
+
+    // Latest block's RMS level in dBFS for one probe channel, measured at the chain
+    // input (post == false) or output (post == true). Read on the message thread.
+    float getProbeDb (bool post, int probeChannel) const;
+
+    // Routing coefficient a lane actually reached at the end of the last block
+    // (0 = transparent, 1 = fully applied). Used to confirm the ramps converged.
+    float getLaneMix (int band, int lane) const;
+
+    // True when at least one occupied, non-bypassed band is routed away from stereo.
+    // Drives both the probe measurement and the log gating (all-stereo = silence).
+    bool hasNonStereoBand() const;
+
+    // Index of the first routed band, or -1.
+    int getFirstNonStereoBand() const;
+
+    // Every occupied, non-bypassed band routed away from stereo, and the count. The
+    // probe log lists all of them: otherwise the first routed band monopolises the line
+    // and a second one (e.g. a `side` band) is never reported -- and `side` is exactly
+    // the case that most needs numeric evidence (MID_SIDE_HANDOFF §16.3).
+    int getRoutedBands (int* out, int maxBands) const;
+
+    // Channel mode of one band (modeStereo when the slot is empty/out of range).
+    Mode getBandMode (int index) const;
+#endif
+
     // Inverse of typeFromString; round-trips exactly with it. Returns one of
     // "peaking" / "lowshelf" / "highshelf" / "lowpass" / "highpass" (the identifiers
     // the Web UI uses).
@@ -135,6 +205,7 @@ private:
         std::atomic<float> gain { 0.0f };
         std::atomic<float> q    { 1.0f };
         std::atomic<int>   slope { 12 };          // dB/oct; lowpass/highpass only
+        std::atomic<int>   mode  { modeStereo };  // channel routing (Mode enum)
         std::atomic<bool>  occupied { false };   // slot has a live band
         std::atomic<bool>  bypass   { false };
 
@@ -147,27 +218,55 @@ private:
     void updateCoefficients (int index);
     void clearBandState (int index);
 
+#if TOREI_EQ_DEBUG_LOG
+    // Audio-thread probe accumulation: writes the block's L/R/M/S RMS (dBFS) into the
+    // probe atomics. No allocation, no lock, no logging.
+    void updateProbe (const juce::AudioBuffer<float>& buffer, bool post);
+#endif
+
     std::array<Band, kMaxBands> bands;
 
     // Per-band cascaded filter coefficients, one entry per section. Rebuilt on the
     // message thread and published by pointer swap, exactly like the old
     // IIR::Filter::coefficients (the audio thread snapshots each Ptr, holding a
     // reference, so a concurrent swap can never free an object still in use).
+    //
+    // NOT per lane: the same H applies to whichever lane the band is routed to.
     std::array<std::array<juce::dsp::IIR::Coefficients<float>::Ptr, kMaxCascades>, kMaxBands> coeffs;
 
-    // Per-band-per-section-per-channel direct-form state (z1, z2) for the manual
-    // real-time-safe processing in process().
-    // Indexing: [band][section][channel][0 = z1, 1 = z2].
-    std::array<std::array<std::array<std::array<float, 2>, 2>, kMaxCascades>, kMaxBands> filterState;
+    // Per-band-per-section-per-LANE direct-form state (z1, z2) for the manual
+    // real-time-safe processing in process(). Four lanes: L, R, Mid, Side.
+    // Indexing: [band][section][lane][0 = z1, 1 = z2].
+    std::array<std::array<std::array<std::array<float, 2>, kNumLanes>, kMaxCascades>, kMaxBands> filterState;
 
     // Per-instance listen target (see setListenIndex above).
     std::atomic<int> listenIndex { -1 };
 
-    // Per-band-per-channel dry/wet ramp (1 = band applied, 0 = transparent).
-    // Listen and bypass both change this target, so switching either one fades
-    // instead of hard-cutting (which would click). SmoothedValue is allocation-free
-    // and safe to advance on the audio thread.
-    std::array<std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, 2>, kMaxBands> bandMix;
+    // Per-band-per-LANE routing ramp. This is both the dry/wet blend (1 = band
+    // applied, 0 = transparent) AND the channel routing:
+    //
+    //   stereo -> L:1 R:1 M:0 S:0      mid -> M:1 (others 0)
+    //   L      -> L:1 (others 0)       side-> S:1 (others 0)
+    //   R      -> R:1 (others 0)
+    //
+    // Because each lane has its own ramp, switching mode is a crossfade, so it never
+    // clicks -- and no coefficient rebuild or state clear is needed (those were the
+    // sources of both earlier click regressions).
+    std::array<std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, kNumLanes>, kMaxBands> bandMix;
+
+#if TOREI_EQ_DEBUG_LOG
+    // Probe state, written by the audio thread and read by the message thread (§13).
+    // Plain atomics: the audio thread only stores, never allocates or locks.
+    std::array<std::array<std::atomic<float>, kNumLanes>, kMaxBands> laneMix;
+    std::atomic<float> probeInL  { -120.0f };
+    std::atomic<float> probeInR  { -120.0f };
+    std::atomic<float> probeInM  { -120.0f };
+    std::atomic<float> probeInS  { -120.0f };
+    std::atomic<float> probeOutL { -120.0f };
+    std::atomic<float> probeOutR { -120.0f };
+    std::atomic<float> probeOutM { -120.0f };
+    std::atomic<float> probeOutS { -120.0f };
+#endif
 
     // --- Solo audition stage (Pro-Q "solo", §0.10) ---
     // Bandpass coefficients for the listened band, rebuilt on the message thread

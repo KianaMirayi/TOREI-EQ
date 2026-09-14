@@ -12,6 +12,7 @@ build_log.txt
 build_out.txt
 build_error.log
 eq_debug.txt
+eq_debug*.txt
 spectrum_debug.txt
 spectrum_test.*
 ui/test.html
@@ -33,6 +34,7 @@ STATE_PERSISTENCE_HANDOFF.md
 OUTPUT_GAIN_HANDOFF.md
 SLOPE_HANDOFF.md
 COEFF_SMOOTHING_HANDOFF.md
+MID_SIDE_HANDOFF.md
 
 # IDE
 .vs/

@@ -201,6 +201,7 @@ void ToreiEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         band.setProperty ("gain",   (double) info[i].gain, nullptr);
         band.setProperty ("q",      (double) info[i].q, nullptr);
         band.setProperty ("slope",  info[i].slope, nullptr);
+        band.setProperty ("mode",   juce::String (EqEngine::modeToString (info[i].mode)), nullptr);
         band.setProperty ("bypass", info[i].bypass, nullptr);
         root.appendChild (band, nullptr);
     }
@@ -246,6 +247,9 @@ void ToreiEQAudioProcessor::setStateInformation (const void* data, int sizeInByt
         // Slope (dB/oct), only meaningful for lowpass/highpass. Defaults to 12 for
         // projects saved before this existed.
         eqEngine.setParam (index, "slope", (int) band.getProperty ("slope", 12));
+
+        // Channel mode (stereo/L/R/mid/side). Missing on older projects -> stereo.
+        eqEngine.setParam (index, "mode", band.getProperty ("mode", "stereo").toString());
 
         if ((bool) band.getProperty ("bypass", false))
             eqEngine.setParam (index, "bypass", true);

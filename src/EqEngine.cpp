@@ -35,11 +35,19 @@ void EqEngine::reset()
     // (it is deliberately NOT persisted in getStateInformation).
     listenIndex.store (-1, std::memory_order_relaxed);
 
-    // Restart every mix ramp from 0 (fully transparent) so the next process() call
+    // Restart every routing ramp from 0 (fully transparent) so the next process() call
     // fades the bands in rather than jumping straight to full gain.
     for (int i = 0; i < kMaxBands; ++i)
-        for (int ch = 0; ch < 2; ++ch)
-            bandMix[i][ch].reset (sampleRate, kMixRampSeconds);
+        for (int lane = 0; lane < kNumLanes; ++lane)
+        {
+            bandMix[i][lane].reset (sampleRate, kMixRampSeconds);
+
+#if TOREI_EQ_DEBUG_LOG
+            // Explicitly initialise the published probe values: a default-constructed
+            // std::atomic is not guaranteed to be zero.
+            laneMix[i][lane].store (0.0f, std::memory_order_relaxed);
+#endif
+        }
 
     // Solo audition stage: drop the bandpass and restart its ramps from "dry" so no
     // stale solo state or filter memory survives a transport/sample-rate change.
@@ -106,6 +114,33 @@ const char* EqEngine::typeToString (Type t)
     }
 }
 
+EqEngine::Mode EqEngine::modeFromString (const juce::String& s)
+{
+    // Case-insensitive, and tolerant of a few spellings, so the UI can send "L"/"R"
+    // (the documented contract) without us being brittle about it.
+    const auto v = s.trim().toLowerCase();
+
+    if (v == "l" || v == "left")   return modeLeft;
+    if (v == "r" || v == "right")  return modeRight;
+    if (v == "mid" || v == "m")    return modeMid;
+    if (v == "side" || v == "s")   return modeSide;
+
+    return modeStereo;   // "stereo", empty, or anything unrecognised
+}
+
+const char* EqEngine::modeToString (Mode m)
+{
+    switch (m)
+    {
+        case modeLeft:  return "L";
+        case modeRight: return "R";
+        case modeMid:   return "mid";
+        case modeSide:  return "side";
+        case modeStereo:
+        default:        return "stereo";
+    }
+}
+
 int EqEngine::getBandSnapshot (BandInfo* out, int maxBands) const
 {
     if (out == nullptr || maxBands <= 0)
@@ -125,6 +160,7 @@ int EqEngine::getBandSnapshot (BandInfo* out, int maxBands) const
         e.gain   = bands[i].gain.load   (std::memory_order_relaxed);
         e.q      = bands[i].q.load      (std::memory_order_relaxed);
         e.slope  = bands[i].slope.load  (std::memory_order_relaxed);
+        e.mode   = (Mode) bands[i].mode.load (std::memory_order_relaxed);
         e.bypass = bands[i].bypass.load (std::memory_order_relaxed);
     }
 
@@ -158,10 +194,10 @@ int EqEngine::stageCountFor (Type type, int slope)
 void EqEngine::clearBandState (int index)
 {
     for (int s = 0; s < kMaxCascades; ++s)
-        for (int ch = 0; ch < 2; ++ch)
+        for (int lane = 0; lane < kNumLanes; ++lane)
         {
-            filterState[index][s][ch][0] = 0.0f;
-            filterState[index][s][ch][1] = 0.0f;
+            filterState[index][s][lane][0] = 0.0f;
+            filterState[index][s][lane][1] = 0.0f;
         }
 }
 
@@ -284,7 +320,8 @@ void EqEngine::addBand (int index, Type type, float freq, float gain, float q)
     b.freq.store (freq);
     b.gain.store (gain);
     b.q.store (q);
-    b.slope.store (12);          // fresh bands are 12 dB/oct, the historical default
+    b.slope.store (12);              // fresh bands are 12 dB/oct, the historical default
+    b.mode.store (modeStereo);       // and act on both channels, as before
     b.bypass.store (false);
     updateCoefficients (index);
     b.occupied.store (true);
@@ -373,6 +410,17 @@ void EqEngine::setParam (int index, const juce::String& param, const juce::var& 
         b.slope.store (normaliseSlope ((int) (double) value), std::memory_order_relaxed);
         updateCoefficients (index);
     }
+    else if (param == "mode")
+    {
+        // Channel routing: "stereo" / "L" / "R" / "mid" / "side" (string, like "type").
+        //
+        // Deliberately NOTHING else happens here: no coefficient rebuild, no state
+        // clear. The mode only changes which lane's routing ramp runs to 1 (see
+        // process()), and because each lane has its own 10 ms ramp this is a crossfade
+        // -- which is exactly why switching mode cannot click. Rebuilding coefficients
+        // or clearing state here is what caused both earlier click regressions.
+        b.mode.store ((int) modeFromString (value.toString()), std::memory_order_relaxed);
+    }
     else if (param == "bypass")
     {
         const bool bypassed = (bool) value;
@@ -409,23 +457,68 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
     // only writer of the per-band mix ramps below.
     const int listen = listenIndex.load (std::memory_order_relaxed);
 
+    // --- M/S runtime probe (MID_SIDE_HANDOFF.md §13) ---
+    // Measure the chain's input and output L/R/M/S levels so the effect of a routed band
+    // can be verified numerically. Only compiled when TOREI_EQ_DEBUG_LOG is 1: the M/S
+    // verification is complete (§18), so a normal build does not run these passes at all.
+#if TOREI_EQ_DEBUG_LOG
+    const bool probe = hasNonStereoBand();
+
+    if (probe)
+        updateProbe (buffer, false);   // chain input
+#endif
+
     for (int i = 0; i < kMaxBands; ++i)
     {
         // Unoccupied slots have no coefficients and nothing to process.
         if (! bands[i].occupied.load (std::memory_order_relaxed))
             continue;
 
-        // Target mix for this band: 1 = fully applied, 0 = transparent.
-        //   - listening -> EVERY band goes transparent, including the listened one.
-        //     With all bands at mix 0 the chain output is the untouched dry signal,
-        //     which the solo bandpass stage below then auditions (§0.10). That is
-        //     why solo needs no separate dry-signal buffer: mix=0 IS the dry path.
-        //   - not listening -> normal behaviour (bypass means transparent).
-        // Driven through a ramp rather than a hard `continue`, because switching
-        // either listen or bypass instantly would click. Hard-skipping a bypassed
-        // band is also what used to make bypass itself pop.
+        // --- Channel routing (MID_SIDE_HANDOFF.md) -------------------------------
+        // Each band maintains four filter lanes (L, R, Mid, Side). `mode` chooses which
+        // lane's routing ramp runs to 1; all the others run to 0. Because every lane has
+        // its own 10 ms ramp, changing mode is a plain crossfade -- no coefficient
+        // rebuild and no state clear, which is exactly why it cannot click.
+        //
+        //   stereo -> L:1 R:1     L -> L:1     R -> R:1
+        //   mid    -> M:1         side -> S:1
         const bool bypassed = bands[i].bypass.load (std::memory_order_relaxed);
-        const float targetMix = (listen >= 0) ? 0.0f : (bypassed ? 0.0f : 1.0f);
+
+        // A band participates at all only when it is not bypassed and nothing is being
+        // soloed. While listening EVERY band goes transparent, including the listened
+        // one: with all bands transparent the chain output IS the untouched dry signal,
+        // which the solo stage below then auditions -- that is why solo needs no
+        // separate dry-signal buffer.
+        const bool enabled = (listen < 0) && ! bypassed;
+
+        // When the band is disabled the mode is irrelevant; assume stereo so that the
+        // L/R lanes (the native domain) are the ones kept warm.
+        const Mode mode = enabled ? (Mode) bands[i].mode.load (std::memory_order_relaxed)
+                                  : modeStereo;
+
+        float laneTarget[kNumLanes] = {};
+
+        if (enabled)
+        {
+            switch (mode)
+            {
+                case modeLeft:  laneTarget[laneL] = 1.0f; break;
+                case modeRight: laneTarget[laneR] = 1.0f; break;
+                case modeMid:   laneTarget[laneM] = 1.0f; break;
+                case modeSide:  laneTarget[laneS] = 1.0f; break;
+                case modeStereo:
+                default:        laneTarget[laneL] = 1.0f;
+                                laneTarget[laneR] = 1.0f; break;
+            }
+        }
+
+        // The lanes of the band's CURRENT domain always run, even at ramp 0, so a
+        // bypass fade-out / fade-in never resumes from frozen filter memory. The other
+        // domain's lanes only run while their ramp is non-zero (i.e. during and after a
+        // mode switch). That is what keeps the common all-stereo case at exactly the
+        // previous cost -- 2 lanes, not 4 -- while still being click-free on a switch.
+        const bool msDomain = (mode == modeMid || mode == modeSide);
+        const bool alwaysRun[kNumLanes] = { ! msDomain, ! msDomain, msDomain, msDomain };
 
         // Number of cascaded sections this band runs (1 for every non-cut type, and
         // 1/1/2/4 for lowpass/highpass at 6/12/24/48 dB/oct).
@@ -477,52 +570,115 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
         if (! coeffsReady)
             continue;
 
-        for (int ch = 0; ch < numChannels; ++ch)
+        float* dL = (numChannels > 0) ? buffer.getWritePointer (0) : nullptr;
+        float* dR = (numChannels > 1) ? buffer.getWritePointer (1) : nullptr;
+
+        if (dL == nullptr)
+            continue;
+
+        // Lane state, hoisted out of the sample loop and written back afterwards.
+        float z1[kNumLanes][kMaxCascades] = {};
+        float z2[kNumLanes][kMaxCascades] = {};
+
+        // Routing coefficient per lane, also hoisted so the end-of-block values can be
+        // published into `laneMix` for the message-thread probe log (§13).
+        float c[kNumLanes] = {};
+
+        for (int lane = 0; lane < kNumLanes; ++lane)
         {
-            bandMix[i][ch].setTargetValue (targetMix);
-
-            float* data = buffer.getWritePointer (ch);
-
-            float z1[kMaxCascades] = {}, z2[kMaxCascades] = {};
+            bandMix[i][lane].setTargetValue (laneTarget[lane]);
 
             for (int s = 0; s < stages; ++s)
             {
-                z1[s] = filterState[i][s][ch][0];
-                z2[s] = filterState[i][s][ch][1];
+                z1[lane][s] = filterState[i][s][lane][0];
+                z2[lane][s] = filterState[i][s][lane][1];
             }
+        }
 
-            for (int n = 0; n < numSamples; ++n)
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float xL = dL[n];
+
+            // Mono bus: the single channel IS the mid content, so treat R == L. The
+            // M/S formulas then yield M = xL and S = 0 by themselves, which is exactly
+            // the documented mono behaviour -- no special case needed.
+            const float xR = (dR != nullptr) ? dR[n] : xL;
+
+            const float mid  = 0.5f * (xL + xR);
+            const float side = 0.5f * (xL - xR);
+
+            const float laneIn[kNumLanes] = { xL, xR, mid, side };
+            float laneOut[kNumLanes] = { xL, xR, mid, side };   // passthrough default
+
+            // The routing ramps must advance exactly once per sample for EVERY lane, so
+            // even a skipped lane still reaches its target. `c` outlives the sample loop
+            // so the last values can be published for the message-thread probe log.
+            for (int lane = 0; lane < kNumLanes; ++lane)
+                c[lane] = bandMix[i][lane].getNextValue();
+
+            for (int lane = 0; lane < kNumLanes; ++lane)
             {
-                const float x = data[n];
+                // Skip the maths entirely when this lane is transparent AND not part of
+                // the current domain. Skipping is exact: its term in the output matrix
+                // below is multiplied by c == 0.
+                if (c[lane] == 0.0f && ! alwaysRun[lane])
+                    continue;
 
-                // Run the cascade. Order is irrelevant to the result (linear system),
-                // but it is fixed so each section keeps its own state.
-                float y = x;
+                // Run the section cascade. Order is irrelevant to the result (linear
+                // system) but is fixed so each section keeps its own state. The cascade
+                // always runs and its state is always written back even when the lane is
+                // transparent, so the ramp returning does not hit stale memory.
+                float y = laneIn[lane];
 
                 for (int s = 0; s < stages; ++s)
                 {
                     const float in  = y;
-                    const float out = sB0[s] * in + z1[s];
-                    z1[s] = sB1[s] * in - sA1[s] * out + z2[s];
-                    z2[s] = sB2[s] * in - sA2[s] * out;
+                    const float out = sB0[s] * in + z1[lane][s];
+                    z1[lane][s] = sB1[s] * in - sA1[s] * out + z2[lane][s];
+                    z2[lane][s] = sB2[s] * in - sA2[s] * out;
                     y = out;
                 }
 
-                // The cascade ALWAYS runs and its state is ALWAYS written back, even
-                // when the band is mixed out. Freezing the state would leave stale
-                // filter memory that produces a transient when the ramp comes back.
-                // (The mix ramp must advance exactly once per sample, which is why it
-                // is read here, outside the section loop.)
-                const float m = bandMix[i][ch].getNextValue();
-                data[n] = x + m * (y - x);
+                laneOut[lane] = y;
             }
 
+            // --- Output matrix ---------------------------------------------------
+            // IMPORTANT: the Mid and Side results belong to BOTH output channels.
+            // Mid is added to L and R with the same sign; Side is added to L and
+            // SUBTRACTED from R. Wiring this as "one lane per output channel" is the
+            // classic way to end up with a mid band that only affects the left side.
+            //
+            //   L_out = L + cL(yL-L) + cM(yM-M) + cS(yS-S)
+            //   R_out = R + cR(yR-R) + cM(yM-M) - cS(yS-S)
+            //
+            // Which is exact for every mode: e.g. mid (cM=1) gives
+            // L_out = L + (H(M)-M) = H(M)+S and R_out = H(M)-S, as derived in
+            // MID_SIDE_HANDOFF.md §9.
+            const float midDelta  = c[laneM] * (laneOut[laneM] - mid);
+            const float sideDelta = c[laneS] * (laneOut[laneS] - side);
+
+            const float outL = xL + c[laneL] * (laneOut[laneL] - xL) + midDelta + sideDelta;
+            const float outR = xR + c[laneR] * (laneOut[laneR] - xR) + midDelta - sideDelta;
+
+            dL[n] = outL;
+
+            if (dR != nullptr)
+                dR[n] = outR;
+        }
+
+        for (int lane = 0; lane < kNumLanes; ++lane)
             for (int s = 0; s < stages; ++s)
             {
-                filterState[i][s][ch][0] = z1[s];
-                filterState[i][s][ch][1] = z2[s];
+                filterState[i][s][lane][0] = z1[lane][s];
+                filterState[i][s][lane][1] = z2[lane][s];
             }
-        }
+
+#if TOREI_EQ_DEBUG_LOG
+        // Publish the routing actually used (end of block) for the probe log. Plain
+        // atomic stores: no allocation, no lock, no IO on the audio thread.
+        for (int lane = 0; lane < kNumLanes; ++lane)
+            laneMix[i][lane].store (c[lane], std::memory_order_relaxed);
+#endif
     }
 
     // --- Solo audition stage (§0.10, Pro-Q "solo" semantics) ---
@@ -599,9 +755,129 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
                 data[n] *= ramp.getNextValue();
         }
     }
+
+#if TOREI_EQ_DEBUG_LOG
+    if (probe)
+        updateProbe (buffer, true);    // chain output
+#endif
 }
 
-int EqEngine::getCurveGains (float* gains, int maxPoints) const
+#if TOREI_EQ_DEBUG_LOG
+void EqEngine::updateProbe (const juce::AudioBuffer<float>& buffer, bool post)
+{
+    const int n = buffer.getNumSamples();
+
+    if (n <= 0 || buffer.getNumChannels() <= 0)
+        return;
+
+    const float* dL = buffer.getReadPointer (0);
+    // Mono: R == L, which yields M = L, S = 0 -- the same convention process() uses.
+    const float* dR = (buffer.getNumChannels() > 1) ? buffer.getReadPointer (1) : dL;
+
+    double sL = 0.0, sR = 0.0, sM = 0.0, sS = 0.0;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double l = dL[i];
+        const double r = dR[i];
+        const double m = 0.5 * (l + r);
+        const double s = 0.5 * (l - r);
+
+        sL += l * l;
+        sR += r * r;
+        sM += m * m;
+        sS += s * s;
+    }
+
+    const float inv = 1.0f / (float) n;
+
+    const float dbL = juce::Decibels::gainToDecibels (std::sqrt ((float) (sL * inv)), -120.0f);
+    const float dbR = juce::Decibels::gainToDecibels (std::sqrt ((float) (sR * inv)), -120.0f);
+    const float dbM = juce::Decibels::gainToDecibels (std::sqrt ((float) (sM * inv)), -120.0f);
+    const float dbS = juce::Decibels::gainToDecibels (std::sqrt ((float) (sS * inv)), -120.0f);
+
+    if (post)
+    {
+        probeOutL.store (dbL, std::memory_order_relaxed);
+        probeOutR.store (dbR, std::memory_order_relaxed);
+        probeOutM.store (dbM, std::memory_order_relaxed);
+        probeOutS.store (dbS, std::memory_order_relaxed);
+    }
+    else
+    {
+        probeInL.store (dbL, std::memory_order_relaxed);
+        probeInR.store (dbR, std::memory_order_relaxed);
+        probeInM.store (dbM, std::memory_order_relaxed);
+        probeInS.store (dbS, std::memory_order_relaxed);
+    }
+}
+
+float EqEngine::getProbeDb (bool post, int probeChannel) const
+{
+    switch (probeChannel)
+    {
+        case probeR: return post ? probeOutR.load (std::memory_order_relaxed)
+                                 : probeInR.load  (std::memory_order_relaxed);
+        case probeM: return post ? probeOutM.load (std::memory_order_relaxed)
+                                 : probeInM.load  (std::memory_order_relaxed);
+        case probeS: return post ? probeOutS.load (std::memory_order_relaxed)
+                                 : probeInS.load  (std::memory_order_relaxed);
+        case probeL:
+        default:     return post ? probeOutL.load (std::memory_order_relaxed)
+                                 : probeInL.load  (std::memory_order_relaxed);
+    }
+}
+
+float EqEngine::getLaneMix (int band, int lane) const
+{
+    if (band < 0 || band >= kMaxBands || lane < 0 || lane >= kNumLanes)
+        return 0.0f;
+
+    return laneMix[band][lane].load (std::memory_order_relaxed);
+}
+
+bool EqEngine::hasNonStereoBand() const
+{
+    return getFirstNonStereoBand() >= 0;
+}
+
+int EqEngine::getFirstNonStereoBand() const
+{
+    for (int i = 0; i < kMaxBands; ++i)
+        if (bands[i].occupied.load (std::memory_order_relaxed)
+            && ! bands[i].bypass.load (std::memory_order_relaxed)
+            && (Mode) bands[i].mode.load (std::memory_order_relaxed) != modeStereo)
+            return i;
+
+    return -1;
+}
+
+int EqEngine::getRoutedBands (int* out, int maxBands) const
+{
+    if (out == nullptr || maxBands <= 0)
+        return 0;
+
+    int n = 0;
+
+    for (int i = 0; i < kMaxBands && n < maxBands; ++i)
+        if (bands[i].occupied.load (std::memory_order_relaxed)
+            && ! bands[i].bypass.load (std::memory_order_relaxed)
+            && (Mode) bands[i].mode.load (std::memory_order_relaxed) != modeStereo)
+            out[n++] = i;
+
+    return n;
+}
+
+EqEngine::Mode EqEngine::getBandMode (int index) const
+{
+    if (index < 0 || index >= kMaxBands)
+        return modeStereo;
+
+    return (Mode) bands[index].mode.load (std::memory_order_relaxed);
+}
+#endif   // TOREI_EQ_DEBUG_LOG
+
+int EqEngine::getCurveGains (float* gains, int maxPoints, CurveGroup group) const
 {
     const int n = std::min (maxPoints, kCurvePoints);
 
@@ -615,6 +891,31 @@ int EqEngine::getCurveGains (float* gains, int maxPoints) const
         {
             if (! bands[b].occupied.load (std::memory_order_relaxed)
                 || bands[b].bypass.load (std::memory_order_relaxed))
+                continue;
+
+            // Which curves does this band show up in? (MID_SIDE_HANDOFF.md §5)
+            //   stereo bands count towards EVERY group -- they act on all channels --
+            //   while a routed band only counts towards its own group. Grouping by
+            //   direct scope like this is what makes the display intuitive: stereo
+            //   bands shift both lines together and never change the GAP between them,
+            //   so the gap is determined purely by the mid/side/L/R bands.
+            const Mode bandMode = (Mode) bands[b].mode.load (std::memory_order_relaxed);
+
+            bool include = (group == curveAll);
+
+            if (! include)
+            {
+                switch (bandMode)
+                {
+                    case modeStereo: include = true; break;
+                    case modeLeft:   include = (group == curveLeft);  break;
+                    case modeRight:  include = (group == curveRight); break;
+                    case modeMid:    include = (group == curveMid);   break;
+                    case modeSide:   include = (group == curveSide);  break;
+                }
+            }
+
+            if (! include)
                 continue;
 
             // A band can be a cascade of up to 4 sections (slope), and magnitude
@@ -705,6 +1006,7 @@ juce::String EqEngine::describe() const
                       << " g=" << juce::String (bands[i].gain.load())
                       << " q=" << juce::String (bands[i].q.load())
                       << " slope=" << juce::String (bands[i].slope.load())
+                      << " mode=" << juce::String (modeToString ((Mode) bands[i].mode.load()))
                       << " stages=" << juce::String (stages)
                       << " b0=" << juce::String (raw[0])
                       << " |H|@" << juce::String (f) << "="
