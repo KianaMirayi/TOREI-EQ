@@ -401,7 +401,17 @@ void ToreiEQAudioProcessorEditor::pushCurve (const char* eventName, EqEngine::Cu
     curvePayload.ensureStorageAllocated (curvePoints);
 
     for (int i = 0; i < curvePoints; ++i)
-        curvePayload.add (juce::var ((double) std::round (curveScratch[i] * 10.0f) * 0.1f));
+    {
+        // NOTE: 0.01 dB, not 0.1 dB. The curve is drawn through g2y(g) = 0.5 - g/60, so
+        // 1 dB is H/60 px and a 0.1 dB quantum is H/600 px -- about 1.37 px on a ~820 px
+        // tall display. That is a WHOLE PIXEL of vertical banding per data step, and it is
+        // the real cause of the "staircase / sawtooth" curve (CURVE_STAIRSTEP_HANDOFF.md):
+        // a low-gain bell spans only a handful of 0.1 dB levels, so consecutive samples
+        // repeat, Catmull-Rom then has p0==p1==p2==p3 and produces LITERALLY flat runs --
+        // which is why whole columns came out byte-identical. 0.01 dB is ~0.14 px, i.e.
+        // sub-pixel and invisible, while keeping the JSON payload compact.
+        curvePayload.add (juce::var ((double) std::round (curveScratch[i] * 100.0f) * 0.01f));
+    }
 
     webView->emitEventIfBrowserIsVisible (eventName, curvePayload);
 
