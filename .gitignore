@@ -17,6 +17,7 @@ spectrum_debug.txt
 spectrum_test.*
 ui/test.html
 ui/react-test.html
+commit_msg.txt
 
 # Local-only docs (kept on disk, not tracked in the repo)
 CONTRACT.md
