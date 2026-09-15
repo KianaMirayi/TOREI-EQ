@@ -97,6 +97,7 @@ private:
     int          pendingLanesBand = -1;          // band awaiting its post-change LANES log
     juce::uint32 pendingLanesAtMs = 0;
     juce::uint32 lastMsProbeMs    = 0;
+    juce::uint32 lastSoloLogMs    = 0;           // SOLO line throttle (§26)
 
     // `ENGINE after setParam` is deferred to the timer and throttled (§15.2). The flag
     // stays set until it has been emitted, so one final line always lands once a drag

@@ -63,12 +63,16 @@ var EQCURVE=new Float32Array(512);var EQCURVE_LEN=0;var SMEQ=new Float32Array(51
 var EQCURVE_S=new Float32Array(512);var EQCURVE_LEN_S=0;var HAS_MS_CURVE=false;
 // L/R 通道曲线（与 M/S 同构）。C++ 未推 L/R 事件时 HAS_LR_CURVE=false，退回单曲线行为。
 var EQCURVE_L=new Float32Array(512);var EQCURVE_LEN_L=0;var EQCURVE_R=new Float32Array(512);var EQCURVE_LEN_R=0;var HAS_LR_CURVE=false;
+// 4 条可同时显示的曲线（Pro-Q 行为）：L 橙 / R 紫 / Mid 绿 / Side 蓝。
+// 数据来源见 applyEqCurve()：stereo band 计入全部四组，所以全 stereo 时四条相同 -> 画一条黄。
+var CV_L=new Float32Array(2000),CV_R=new Float32Array(2000),CV_M=new Float32Array(2000),CV_S=new Float32Array(2000);
 function bindCurveFromCpp(){if(typeof __JUCE__!=='undefined'&&__JUCE__.backend){var takeM=function(data){var n=Math.min(data.length,EQCURVE.length);EQCURVE_LEN=n;for(var i=0;i<n;i++)EQCURVE[i]=data[i]||0};var takeS=function(data){var n=Math.min(data.length,EQCURVE_S.length);EQCURVE_LEN_S=n;HAS_MS_CURVE=true;for(var i=0;i<n;i++)EQCURVE_S[i]=data[i]||0};var takeL=function(data){var n=Math.min(data.length,EQCURVE_L.length);EQCURVE_LEN_L=n;HAS_LR_CURVE=true;for(var i=0;i<n;i++)EQCURVE_L[i]=data[i]||0};var takeR=function(data){var n=Math.min(data.length,EQCURVE_R.length);EQCURVE_LEN_R=n;HAS_LR_CURVE=true;for(var i=0;i<n;i++)EQCURVE_R[i]=data[i]||0};__JUCE__.backend.addEventListener('EQ_Curve_Data',takeM);__JUCE__.backend.addEventListener('EQ_Curve_Data_Mid',takeM);__JUCE__.backend.addEventListener('EQ_Curve_Data_Side',takeS);__JUCE__.backend.addEventListener('EQ_Curve_Data_L',takeL);__JUCE__.backend.addEventListener('EQ_Curve_Data_R',takeR);return true}return false}
 function smoothCurve(a,n){if(n<5)return;var p2=a[0],p1=a[0],c=a[0];for(var i=1;i<n-1;i++){var nx1=a[i+1],nx2=(i<n-2)?a[i+2]:a[n-1];a[i]=(p2+4*p1+6*c+4*nx1+nx2)/16;p2=p1;p1=c;c=nx1}}
 function expandCurve(src,n,dst,W){if(n<2){for(var j=0;j<W;j++)dst[j]=0;return}SMEQ[0]=src[0];SMEQ[n-1]=src[n-1];for(var i=1;i<n-1;i++){var a=src[i-1],b=src[i],c=src[i+1];if((b>=a&&b>=c)||(b<=a&&b<=c))SMEQ[i]=b;else SMEQ[i]=(a+b+c)/3}for(var j=0;j<W;j++){var pos=(j/(W-1))*(n-1),i0=Math.floor(pos),i1=Math.min(n-1,i0+1),t=pos-i0,p0=SMEQ[Math.max(0,i0-1)],p1=SMEQ[i0],p2=SMEQ[i1],p3=SMEQ[Math.min(n-1,i1+1)],t2=t*t,t3=t2*t;dst[j]=.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3)}}
-// useLR=true 时用 L/R 组曲线（橙/紫），否则用 M/S 组（绿/蓝）。该组无数据时退回"两条相同"= 单曲线。
-function applyEqCurve(W,useLR){var A=useLR?EQCURVE_L:EQCURVE,AL=useLR?EQCURVE_LEN_L:EQCURVE_LEN,Bc=useLR?EQCURVE_R:EQCURVE_S,BL=useLR?EQCURVE_LEN_R:EQCURVE_LEN_S,hasB=useLR?HAS_LR_CURVE:HAS_MS_CURVE;expandCurve(A,AL,CURVE,W);if(hasB)expandCurve(Bc,BL,CURVE2,W);else for(var j=0;j<W;j++)CURVE2[j]=CURVE[j]}
-function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CURVE[i]=tgM;CURVE2[i]=tgS}CURVE_DIRTY=false}
+// 填充 4 条曲线：Mid 为基准（stereo band 计入全部四组），有对应数据时覆盖 Side / L / R。
+// 全 stereo 时四条自然相同 -> 绘制层会合并成一条黄线（与 M/S 之前的行为一致）。
+function applyEqCurve(W){expandCurve(EQCURVE,EQCURVE_LEN,CV_M,W);for(var j=0;j<W;j++){CV_S[j]=CV_M[j];CV_L[j]=CV_M[j];CV_R[j]=CV_M[j]}if(HAS_MS_CURVE&&EQCURVE_LEN_S>0)expandCurve(EQCURVE_S,EQCURVE_LEN_S,CV_S,W);if(HAS_LR_CURVE){if(EQCURVE_LEN_L>0)expandCurve(EQCURVE_L,EQCURVE_LEN_L,CV_L,W);if(EQCURVE_LEN_R>0)expandCurve(EQCURVE_R,EQCURVE_LEN_R,CV_R,W)}}
+function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*3),tgM=0,tgS=0;for(var j=0;j<bands.length;j++){var b=bands[j];if(!b.active||b.mute||b.bypass)continue;var w=Math.log(b.freq/Math.max(1,f))/Math.LN2,sh=0;if(b.type==="peaking"){var bw=1.2/b.q;sh=b.gain*Math.exp(-(w*w)/(2*bw*bw))}else if(b.type==="lowshelf")sh=b.gain/(1+Math.exp(-w*2));else if(b.type==="highshelf")sh=b.gain/(1+Math.exp(w*2));else if(b.type==="lowpass"){var o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(w*2)))}else{o=(b.slope||12)/6;sh=-3*o*(1-1/(1+Math.exp(-w*2)))}if(b.mode==="mid")tgM+=sh;else if(b.mode==="side")tgS+=sh;else{tgM+=sh;tgS+=sh}}CV_M[i]=tgM;CV_L[i]=tgM;CV_R[i]=tgM;CV_S[i]=tgS}CURVE_DIRTY=false}
 
 function useStore(){
   var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0}]);B=_r[0];setB=_r[1];
@@ -403,42 +407,35 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
   for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
   ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.stroke();
-  // 决定显示哪一组通道曲线：选中节点属 L/R 组 → L/R；否则若存在 L/R band 且无 M/S band → L/R；否则 M/S
-  var _msC=0,_lrC=0,_q;for(_q=0;_q<b.length;_q++){var _m=b[_q].mode;if(_m==="mid"||_m==="side")_msC++;else if(_m==="L"||_m==="R")_lrC++}
-  var _sb=null;for(_q=0;_q<b.length;_q++)if(b[_q].id===store.sel)_sb=b[_q];
-  var useLR=!!((_sb&&(_sb.mode==="L"||_sb.mode==="R"))||(_lrC>0&&_msC===0));
-  if(useLR&&HAS_LR_CURVE)applyEqCurve(W,true);else if(EQCURVE_LEN>0)applyEqCurve(W,false);else if(CURVE_DIRTY)mockCurve(b,W);
-  smoothCurve(CURVE,W);smoothCurve(CURVE2,W);
-  // Detect M/S split
-  var split=false;
-  for(i=8;i<W;i+=8){if(Math.abs(g2y(CURVE[i])*H-g2y(CURVE2[i])*H)>Math.max(2,H*.008)){split=true;break}}
+  // 4 条曲线同时显示（Pro-Q 行为）：L 橙 / R 紫 / Mid 绿 / Side 蓝
+  if(EQCURVE_LEN>0)applyEqCurve(W);else if(CURVE_DIRTY)mockCurve(b,W);
+  smoothCurve(CV_M,W);smoothCurve(CV_S,W);smoothCurve(CV_L,W);smoothCurve(CV_R,W);
+  // 检测两组各自是否有差异：无差异的组不单独绘制（否则与其它曲线完全重合）
+  var _TH=Math.max(2,H*.008),msDiff=false,lrDiff=false,_sp;
+  for(i=8;i<W;i+=8){
+    if(Math.abs(g2y(CV_M[i])*H-g2y(CV_S[i])*H)>_TH)msDiff=true;
+    if(Math.abs(g2y(CV_L[i])*H-g2y(CV_R[i])*H)>_TH)lrDiff=true;
+    if(msDiff&&lrDiff)break;
+  }
   var selB2=store.selB;
   var trace=function(arr){ctx.beginPath();ctx.moveTo(0,g2y(arr[0])*H);for(var j=0;j<W-1;j++){var x=j,nx=j+1,y=g2y(arr[j])*H,ny=g2y(arr[j+1])*H;ctx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}ctx.stroke()};
-  if(!split){
-    ctx.globalAlpha=.2;ctx.lineWidth=3;ctx.strokeStyle="rgba(234,179,8,1)";trace(CURVE);
-    ctx.globalAlpha=1;ctx.lineWidth=1.2;ctx.strokeStyle="rgba(255,229,185,.95)";trace(CURVE);
+  if(!msDiff&&!lrDiff){
+    // 全 stereo（四条相同）：一条黄线，与 M/S 之前的行为一致
+    ctx.globalAlpha=.2;ctx.lineWidth=3;ctx.strokeStyle="rgba(234,179,8,1)";trace(CV_M);
+    ctx.globalAlpha=1;ctx.lineWidth=1.2;ctx.strokeStyle="rgba(255,229,185,.95)";trace(CV_M);
   }else{
-    var fM=1,fS=1;
-    if(selB2){if(selB2.mode==="mid"){fM=1;fS=.25}else if(selB2.mode==="side"){fM=.25;fS=1}else if(selB2.mode==="L"){fM=1;fS=.25}else if(selB2.mode==="R"){fM=.25;fS=1}}
-    // Per-pixel Delta Fusion gradient (green/blue fade to yellow where curves merge)
-    var MERGE=Math.max(2,H*.008);
-    var mkGrad=function(base){var g=ctx.createLinearGradient(0,0,W,0),st=4;g.addColorStop(0,"rgb("+base+")");
-      for(var x=st;x<W;x+=st){var md=1e9,xx;for(xx=Math.max(0,x-3);xx<=Math.min(W-1,x+3);xx++){var ddx=Math.abs(g2y(CURVE[xx])*H-g2y(CURVE2[xx])*H);if(ddx<md)md=ddx}var t=Math.min(1,md/MERGE),cv=base.split(",");
-        g.addColorStop(x/W,"rgb("+Math.round(255+(+cv[0]-255)*t)+","+Math.round(229+(+cv[1]-229)*t)+","+Math.round(185+(+cv[2]-185)*t)+")")}
-      return g};
-    var gS=mkGrad(useLR?"168,85,247":"56,189,248"),gM=mkGrad(useLR?"249,115,22":"34,197,94");
-    // Side curve: glow (width*2.5, alpha*0.25) then core — bottom layer
-    ctx.globalAlpha=fS*.25;ctx.lineWidth=fS>.9?3.5:2.5;ctx.strokeStyle=gS;trace(CURVE2);
-    ctx.globalAlpha=fS;ctx.lineWidth=fS>.9?1.4:1.0;ctx.strokeStyle=gS;trace(CURVE2);
-    // Mid curve: glow then core — top layer
-    ctx.globalAlpha=fM*.25;ctx.lineWidth=fM>.9?3.5:2.5;ctx.strokeStyle=gM;trace(CURVE);
-    ctx.globalAlpha=fM;ctx.lineWidth=fM>.9?1.4:1.0;ctx.strokeStyle=gM;trace(CURVE);
+    // 多通道：最多四条同时显示（Pro-Q 行为）。选中节点所在的组更亮，另一组淡化但仍可见。
+    var fMS=1,fLR=1;
+    if(selB2){if(selB2.mode==="mid"||selB2.mode==="side")fLR=.3;else if(selB2.mode==="L"||selB2.mode==="R")fMS=.3}
+    var drawC=function(arr,col,f){if(f<=0)return;ctx.globalAlpha=f*.22;ctx.lineWidth=3.5;ctx.strokeStyle="rgb("+col+")";trace(arr);ctx.globalAlpha=f;ctx.lineWidth=1.4;ctx.strokeStyle="rgb("+col+")";trace(arr)};
+    if(msDiff){drawC(CV_S,"56,189,248",fMS);drawC(CV_M,"34,197,94",fMS)}
+    if(lrDiff){drawC(CV_R,"168,85,247",fLR);drawC(CV_L,"249,115,22",fLR)}
     ctx.globalAlpha=1;
   }
   for(i=0;i<b.length;i++){var bn=b[i];if(!bn.active||bn.mute)continue;var nx=f2x(bn.freq)*W,ny=g2y(bn.gain)*H,isSel=bn.id===store.sel;var nodeAlpha=listenId&&bn.id!==listenId?.15:(bn.bypass?.35:1);
     if(isSel){var hrg=ctx.createRadialGradient(nx,ny,2,nx,ny,26);hrg.addColorStop(0,"rgba("+BC[i%8]+",.55)");hrg.addColorStop(1,"rgba("+BC[i%8]+",0)");ctx.fillStyle=hrg;ctx.beginPath();ctx.arc(nx,ny,26,0,Math.PI*2);ctx.fill()}
     ctx.globalAlpha=nodeAlpha;ctx.beginPath();ctx.arc(nx,ny,isSel?9:7,0,Math.PI*2);ctx.fillStyle="rgb("+BC[i%8]+")";ctx.shadowColor="rgba("+BC[i%8]+",.9)";ctx.shadowBlur=isSel?15:0;ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=isSel?"#fff":"rgba(255,255,255,.85)";ctx.lineWidth=2;ctx.stroke();ctx.globalAlpha=1;
-    if(bn.mode!=="stereo"){var lbl=bn.mode==="mid"?"M":"S",lc=bn.mode==="mid"?"#22c55e":"#38bdf8",lx=bn.mode==="mid"?nx-13:nx+13,ly=ny;
+    if(bn.mode!=="stereo"){var _mt=bn.mode==="mid"?{t:"M",c:"#22c55e",o:-13}:(bn.mode==="side"?{t:"S",c:"#38bdf8",o:13}:(bn.mode==="L"?{t:"L",c:"#f97316",o:-13}:{t:"R",c:"#a855f7",o:13})),lbl=_mt.t,lc=_mt.c,lx=nx+_mt.o,ly=ny;
       ctx.font="bold 9px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
       ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(lx-7,ly-6,14,12);
       ctx.strokeStyle=lc;ctx.lineWidth=1;ctx.strokeRect(lx-7,ly-6,14,12);

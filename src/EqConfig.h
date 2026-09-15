@@ -9,7 +9,10 @@
 //                  lane-mix atomics, the curve-peak bookkeeping). That means zero
 //                  runtime cost and zero writes to eq_debug.txt in normal use.
 //   1           -- recompile to get the full diagnostics back. This was used for
-//                  the M/S verification round (MID_SIDE_HANDOFF.md §13 / §18).
+//                  the M/S verification round (MID_SIDE_HANDOFF.md 13 / 18).
+//
+// >>> CURRENTLY SET TO 1 (diagnostics ON) at the user's request, for a logging
+// >>> session. Set it back to 0 and rebuild to return to the quiet default.
 //
 // Kept ON regardless of the switch:
 //   * logEq() itself, and the 8 MB rotation guard inside it;

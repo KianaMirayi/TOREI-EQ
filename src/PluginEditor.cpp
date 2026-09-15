@@ -293,6 +293,34 @@ void ToreiEQAudioProcessorEditor::logMsDiagnostics()
         logEq ("ENGINE after setParam  " + engine.describe());
     }
 
+    // (2b) SOLO -- the solo stage's OWN routing ramps and audition output (§26).
+    // Deliberately placed BEFORE the "is anything routed away from stereo" gate below:
+    // the solo stage has its own ramps, and soloing a plain STEREO band must still be
+    // reportable. Emitted only while actually listening, so it is silent otherwise.
+    {
+        const int listenBand = engine.getListenIndex();
+
+        if (listenBand >= 0 && now - lastSoloLogMs >= kEngineLogIntervalMs)
+        {
+            lastSoloLogMs = now;
+
+            const auto fmtW = [&engine] (int lane)
+            {
+                return juce::String (engine.getSoloWeight (lane), 3);   // converged value
+            };
+
+            logEq ("SOLO listen=b" + juce::String (listenBand)
+                   + " mode=" + juce::String (EqEngine::modeToString (engine.getBandMode (listenBand)))
+                   + "  w: L=" + fmtW (EqEngine::laneL)
+                   + " R=" + fmtW (EqEngine::laneR)
+                   + " M=" + fmtW (EqEngine::laneM)
+                   + " S=" + fmtW (EqEngine::laneS)
+                   + " | soloOut: L=" + juce::String (engine.getSoloOutDb (false), 1)
+                   + " R=" + juce::String (engine.getSoloOutDb (true), 1)
+                   + " corr=" + juce::String (engine.getSoloOutCorr(), 2));
+        }
+    }
+
     // Everything below is periodic M/S probing, which only means anything while a band
     // is actually routed away from stereo -- so the common all-stereo case stays silent
     // (§13.4).

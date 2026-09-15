@@ -49,15 +49,33 @@ void EqEngine::reset()
 #endif
         }
 
+#if TOREI_EQ_DEBUG_LOG
+    // Solo-stage probe (§26) starts with no data so the SOLO log reports -120 dB until a
+    // block has actually been auditioned.
+    for (int lane = 0; lane < kNumLanes; ++lane)
+        soloWeightCurrent[lane].store (0.0f, std::memory_order_relaxed);
+
+    soloProbeL2.store (0.0f, std::memory_order_relaxed);
+    soloProbeR2.store (0.0f, std::memory_order_relaxed);
+    soloProbeLR.store (0.0f, std::memory_order_relaxed);
+    soloProbeN .store (0,    std::memory_order_relaxed);
+#endif
+
     // Solo audition stage: drop the bandpass and restart its ramps from "dry" so no
     // stale solo state or filter memory survives a transport/sample-rate change.
     // NOTE: soloLevelDb is intentionally NOT reset -- it is the user's solo playback
     // level (the UI owns it and keeps showing it), not transport state.
     soloCoeffs = nullptr;
+
+    for (int lane = 0; lane < kNumLanes; ++lane)
+    {
+        soloState[lane][0] = 0.0f;
+        soloState[lane][1] = 0.0f;
+        soloWeight[lane].reset (sampleRate, kMixRampSeconds);
+    }
+
     for (int ch = 0; ch < 2; ++ch)
     {
-        soloState[ch][0] = 0.0f;
-        soloState[ch][1] = 0.0f;
         soloMix[ch].reset (sampleRate, kMixRampSeconds);
         soloGain[ch].reset (sampleRate, kMixRampSeconds);
     }
@@ -223,10 +241,10 @@ void EqEngine::clearAllBands()
         clearBandState (i);
     }
 
-    for (int ch = 0; ch < 2; ++ch)
+    for (int lane = 0; lane < kNumLanes; ++lane)
     {
-        soloState[ch][0] = 0.0f;
-        soloState[ch][1] = 0.0f;
+        soloState[lane][0] = 0.0f;
+        soloState[lane][1] = 0.0f;
     }
 }
 
@@ -681,11 +699,26 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
 #endif
     }
 
-    // --- Solo audition stage (§0.10, Pro-Q "solo" semantics) ---
-    // Appends a bandpass of the DRY signal (the chain above is fully transparent
-    // while listening), so you hear the frequency content around the listened band
-    // with none of the EQ gain. Both the blend and the level are ramped, so
-    // entering/leaving solo and dragging the solo volume never click or zipper.
+    // --- Solo audition stage (§0.10 / §22) ---
+    // Appends a bandpass of the DRY signal (the chain above is fully transparent while
+    // listening), so you hear the frequency content around the listened band with none
+    // of the EQ gain.
+    //
+    // The audition is built from the LANES the listened band acts on (§22). That is what
+    // makes L solo only the left ear, R only the right, and mid/side mono (both output
+    // channels identical) -- matching Pro-Q, where soloing a band plays the spectrum
+    // that band affects, and only that.
+    //
+    //   stereo -> bp(L) on L, bp(R) on R
+    //   L      -> bp(L) on L, silence on R
+    //   R      -> silence on L, bp(R) on R
+    //   mid    -> bp(M) on BOTH        (M = (L+R)/2)
+    //   side   -> bp(S) on BOTH        (S = (L-R)/2)
+    //
+    // The blend still has the same shape as before -- out = (1-m)*x + m*t -- so all the
+    // existing ramp behaviour (and the no-click guarantee) is unchanged. For `stereo`
+    // the weights multiply by 1.0 and the extra lanes contribute exactly 0, so the
+    // result is bit-identical to the previous implementation.
     {
         // Snapshot: holding the reference keeps the object alive if the message
         // thread swaps the coefficients mid-block.
@@ -694,44 +727,153 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
         const float targetSoloMix  = (listen >= 0) ? 1.0f : 0.0f;
         const float targetSoloGain = juce::Decibels::decibelsToGain (soloLevelDb.load (std::memory_order_relaxed));
 
+        // Same routing table the band chain uses, read from the listened band's mode.
+        float weightTarget[kNumLanes] = {};
+
+        if (listen >= 0 && listen < kMaxBands)
+        {
+            switch ((Mode) bands[listen].mode.load (std::memory_order_relaxed))
+            {
+                case modeLeft:  weightTarget[laneL] = 1.0f; break;
+                case modeRight: weightTarget[laneR] = 1.0f; break;
+                case modeMid:   weightTarget[laneM] = 1.0f; break;
+                case modeSide:  weightTarget[laneS] = 1.0f; break;
+                case modeStereo:
+                default:        weightTarget[laneL] = 1.0f;
+                                weightTarget[laneR] = 1.0f; break;
+            }
+        }
+
         if (sc != nullptr)
         {
-            const auto* c = sc->getRawCoefficients();
-            const float b0 = c[0], b1 = c[1], b2 = c[2];
-            const float a1 = c[3], a2 = c[4];
+            // Read by ORDER, like the band chain: a second-order section is
+            // [b0,b1,b2,a1,a2] (5 values) but a first-order one is [b0,b1,a1] (3).
+            const int order = (int) sc->getFilterOrder();
+            const auto* c   = sc->getRawCoefficients();
 
-            for (int ch = 0; ch < numChannels; ++ch)
+            const float sb0 = c[0];
+            const float sb1 = c[1];
+            const float sb2 = (order >= 2) ? c[2] : 0.0f;
+            const float sa1 = c[(order >= 2) ? 3 : 2];
+            const float sa2 = (order >= 2) ? c[4] : 0.0f;
+
+            for (int lane = 0; lane < kNumLanes; ++lane)
+                soloWeight[lane].setTargetValue (weightTarget[lane]);
+
+            for (int ch = 0; ch < 2; ++ch)
             {
                 soloMix[ch].setTargetValue (targetSoloMix);
                 soloGain[ch].setTargetValue (targetSoloGain);
+            }
 
-                float* data = buffer.getWritePointer (ch);
-                float z1 = soloState[ch][0];
-                float z2 = soloState[ch][1];
+            float* dL = (numChannels > 0) ? buffer.getWritePointer (0) : nullptr;
+            float* dR = (numChannels > 1) ? buffer.getWritePointer (1) : nullptr;
 
-                for (int n = 0; n < numSamples; ++n)
+            float z1[kNumLanes], z2[kNumLanes];
+
+            for (int lane = 0; lane < kNumLanes; ++lane)
+            {
+                z1[lane] = soloState[lane][0];
+                z2[lane] = soloState[lane][1];
+            }
+
+            // Hoisted out of the sample loop so the end-of-block values can be published
+            // for the SOLO log (§26).
+            float w[kNumLanes] = {};
+
+#if TOREI_EQ_DEBUG_LOG
+            float sumL2 = 0.0f, sumR2 = 0.0f, sumLR = 0.0f;
+#endif
+
+            for (int n = 0; n < numSamples && dL != nullptr; ++n)
+            {
+                const float xL = dL[n];
+                // Mono: R == L, so M = L and S = 0 -- the same convention as the chain.
+                const float xR = (dR != nullptr) ? dR[n] : xL;
+
+                const float laneIn[kNumLanes] = { xL, xR,
+                                                  0.5f * (xL + xR),   // mid
+                                                  0.5f * (xL - xR) }; // side
+
+                float bp[kNumLanes];
+
+                for (int lane = 0; lane < kNumLanes; ++lane)
                 {
-                    const float x  = data[n];
-                    const float bp = b0 * x + z1;      // bandpass, always running so its
-                    z1 = b1 * x - a1 * bp + z2;        // state stays continuous across
-                    z2 = b2 * x - a2 * bp;             // both solo and dry
+                    // The bandpass ALWAYS runs so its state stays continuous across solo,
+                    // dry and mode changes (a frozen state would produce a transient).
+                    const float in  = laneIn[lane];
+                    const float out = sb0 * in + z1[lane];
+                    z1[lane] = sb1 * in - sa1 * out + z2[lane];
+                    z2[lane] = sb2 * in - sa2 * out;
 
-                    const float m = soloMix[ch].getNextValue();
-                    const float g = soloGain[ch].getNextValue();
-                    data[n] = x + m * (bp * g - x);
+                    bp[lane] = out;
+                    w[lane]  = soloWeight[lane].getNextValue();
                 }
 
-                soloState[ch][0] = z1;
-                soloState[ch][1] = z2;
+                const float mixL = soloMix[0].getNextValue();
+                const float mixR = soloMix[1].getNextValue();
+                const float gL   = soloGain[0].getNextValue();
+                const float gR   = soloGain[1].getNextValue();
+
+                // Mid lands on BOTH outputs with the same sign; Side lands on L and is
+                // SUBTRACTED from R (§25). That mirrors the main chain's own matrix and,
+                // more importantly, how each component really exists in the signal
+                // (L = M+S, R = M-S): a side band lives as +S on the left and -S on the
+                // right. So side solo is ANTI-PHASE and therefore NULLS in mono -- the
+                // Pro-Q "perfect null", and the only way to tell side from mid by ear.
+                // (An in-phase side solo would instead sum to 2S in mono, i.e. LOUDER.)
+                //
+                // The per-term weight tests are deliberate rather than plain multiplies:
+                // bp*0 is NOT 0 when bp is NaN/Inf, which would let a pathological sample
+                // in an UNUSED lane poison the output.
+                const float midTerm  = (w[laneM] != 0.0f) ? bp[laneM] * w[laneM] : 0.0f;
+                const float sideTerm = (w[laneS] != 0.0f) ? bp[laneS] * w[laneS] : 0.0f;
+
+                const float tL = gL * (bp[laneL] * w[laneL] + midTerm + sideTerm);
+                const float tR = gR * (bp[laneR] * w[laneR] + midTerm - sideTerm);
+
+                const float outL = xL + mixL * (tL - xL);
+                const float outR = xR + mixR * (tR - xR);
+
+                dL[n] = outL;
+
+                if (dR != nullptr)
+                    dR[n] = outR;
+
+#if TOREI_EQ_DEBUG_LOG
+                // Solo-stage output probe (§26). Sigma(outL*outR) is what makes mid and
+                // side distinguishable numerically: same RMS, opposite correlation.
+                sumL2 += outL * outL;
+                sumR2 += outR * outR;
+                sumLR += outL * outR;
+#endif
             }
+
+            for (int lane = 0; lane < kNumLanes; ++lane)
+            {
+                soloState[lane][0] = z1[lane];
+                soloState[lane][1] = z2[lane];
+            }
+
+#if TOREI_EQ_DEBUG_LOG
+            // Publish for the message-thread SOLO log. Plain atomic stores: the audio
+            // thread never allocates, locks or does IO (§13.2).
+            for (int lane = 0; lane < kNumLanes; ++lane)
+                soloWeightCurrent[lane].store (w[lane], std::memory_order_relaxed);
+
+            soloProbeL2.store (sumL2, std::memory_order_relaxed);
+            soloProbeR2.store (sumR2, std::memory_order_relaxed);
+            soloProbeLR.store (sumLR, std::memory_order_relaxed);
+            soloProbeN .store ((dL != nullptr) ? numSamples : 0, std::memory_order_relaxed);
+#endif
         }
         else
         {
-            // No bandpass (never soloed, or cleared by clearAllBands). SNAP the blend
-            // to fully dry rather than ramping: there is nothing to blend anyway, and
-            // snapping guarantees that when a bandpass reappears the stage still
-            // starts from dry instead of jumping straight to full solo.
-            for (int ch = 0; ch < numChannels; ++ch)
+            // No bandpass (never soloed, or cleared by clearAllBands). SNAP the blend to
+            // fully dry rather than ramping: there is nothing to blend anyway, and
+            // snapping guarantees that when a bandpass reappears the stage still starts
+            // from dry instead of jumping straight to full solo.
+            for (int ch = 0; ch < 2; ++ch)
                 soloMix[ch].setCurrentAndTargetValue (0.0f);
         }
     }
@@ -874,6 +1016,43 @@ EqEngine::Mode EqEngine::getBandMode (int index) const
         return modeStereo;
 
     return (Mode) bands[index].mode.load (std::memory_order_relaxed);
+}
+
+float EqEngine::getSoloWeight (int lane) const
+{
+    if (lane < 0 || lane >= kNumLanes)
+        return 0.0f;
+
+    return soloWeightCurrent[lane].load (std::memory_order_relaxed);
+}
+
+float EqEngine::getSoloOutDb (bool right) const
+{
+    const int n = soloProbeN.load (std::memory_order_relaxed);
+
+    if (n <= 0)
+        return -120.0f;
+
+    const float sum = right ? soloProbeR2.load (std::memory_order_relaxed)
+                            : soloProbeL2.load (std::memory_order_relaxed);
+
+    return juce::Decibels::gainToDecibels (std::sqrt (sum / (float) n), -120.0f);
+}
+
+float EqEngine::getSoloOutCorr() const
+{
+    const float l2 = soloProbeL2.load (std::memory_order_relaxed);
+    const float r2 = soloProbeR2.load (std::memory_order_relaxed);
+    const float lr = soloProbeLR.load (std::memory_order_relaxed);
+
+    // Correlation of the audition's two outputs. mid (in phase) -> +1, side (anti phase)
+    // -> -1, which is the one numeric quantity that separates them.
+    const float den = std::sqrt (l2 * r2);
+
+    if (den <= 1.0e-12f)
+        return 0.0f;   // one side is silent (e.g. L/R modes): correlation undefined
+
+    return juce::jlimit (-1.0f, 1.0f, lr / den);
 }
 #endif   // TOREI_EQ_DEBUG_LOG
 

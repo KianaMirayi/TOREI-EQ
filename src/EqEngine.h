@@ -168,6 +168,18 @@ public:
 
     // Channel mode of one band (modeStereo when the slot is empty/out of range).
     Mode getBandMode (int index) const;
+
+    // --- Solo-stage probe (MID_SIDE_HANDOFF.md §26) ---
+    // The solo stage has its OWN routing ramps (`soloWeight`), so the main-chain LANES
+    // log says nothing about what the audition is actually built from. These expose the
+    // CONVERGED ramp values plus the audition's output level and L/R correlation.
+    //
+    // The published values come from atomics filled by the audio thread, NOT from
+    // SmoothedValue::getCurrentValue() -- reading that from the message thread would be
+    // a data race (§13.2).
+    float getSoloWeight (int lane) const;
+    float getSoloOutDb (bool right) const;   // dBFS RMS of the solo stage output
+    float getSoloOutCorr() const;            // L/R correlation: mid ~ +1, side ~ -1
 #endif
 
     // Inverse of typeFromString; round-trips exactly with it. Returns one of
@@ -266,6 +278,13 @@ private:
     std::atomic<float> probeOutR { -120.0f };
     std::atomic<float> probeOutM { -120.0f };
     std::atomic<float> probeOutS { -120.0f };
+
+    // Solo-stage probe (§26), also audio-thread -> message-thread atomics.
+    std::array<std::atomic<float>, kNumLanes> soloWeightCurrent;
+    std::atomic<float> soloProbeL2 { 0.0f };   // Σ outL²  over the last block
+    std::atomic<float> soloProbeR2 { 0.0f };   // Σ outR²
+    std::atomic<float> soloProbeLR { 0.0f };   // Σ outL·outR  (for the correlation)
+    std::atomic<int>   soloProbeN  { 0 };      // samples accumulated (0 = no data)
 #endif
 
     // --- Solo audition stage (Pro-Q "solo", §0.10) ---
@@ -273,13 +292,22 @@ private:
     // whenever the listen target or its freq/Q changes. Published by pointer swap,
     // and snapshotted (reference held) on the audio thread just like `coeffs`.
     juce::dsp::IIR::Coefficients<float>::Ptr soloCoeffs;
-    std::array<std::array<float, 2>, 2> soloState;   // [channel][z1/z2]
 
-    // Ramped so entering/leaving solo, and dragging the solo volume, never click or
-    // zipper. `soloMix` blends the bandpass in (0 = dry, 1 = solo); `soloGain`
-    // carries the +-24 dB solo level.
+    // Four bandpass states, one per lane (L, R, Mid, Side). Solo must audition only the
+    // channels the listened band actually acts on (MID_SIDE_HANDOFF.md §22), so the
+    // Mid/Side lanes need their OWN filter memory: pushing the M/S signals through the
+    // L/R state history would corrupt the result.
+    // Value-initialised so it is well defined even before prepare()/reset() runs.
+    std::array<std::array<float, 2>, kNumLanes> soloState {};   // [lane][z1/z2]
+
+    // Ramped so entering/leaving solo and dragging the solo volume never click or
+    // zipper. `soloMix` blends the bandpass in (0 = dry, 1 = solo); `soloGain` carries
+    // the +-24 dB solo level; `soloWeight` selects which lanes the audition is built
+    // from -- ramping THOSE is what makes a `mode` change while already soloing a
+    // crossfade rather than a jump (§22.6 item 6).
     std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, 2> soloMix;
     std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, 2> soloGain;
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, kNumLanes> soloWeight;
 
     std::atomic<float> soloLevelDb { 0.0f };   // +-24 dB, playback level only
 
