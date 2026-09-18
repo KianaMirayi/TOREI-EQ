@@ -5,6 +5,10 @@ void EqEngine::prepare (double sr, int samplesPerBlock)
     juce::ignoreUnused (samplesPerBlock);
     sampleRate = sr;
 
+    // The curve is a function of the coefficient magnitudes AT THIS RATE, so a
+    // sample-rate change is a curve change (see EqEngine.h getCurveRevision()).
+    bumpCurveRevision();
+
     // Reset filter processing state, but PRESERVE the band definitions.
     reset();
 
@@ -241,6 +245,9 @@ void EqEngine::clearAllBands()
         clearBandState (i);
     }
 
+    // Every band is gone, so the curve is (or is about to be) flat again.
+    bumpCurveRevision();
+
     for (int lane = 0; lane < kNumLanes; ++lane)
     {
         soloState[lane][0] = 0.0f;
@@ -343,6 +350,9 @@ void EqEngine::addBand (int index, Type type, float freq, float gain, float q)
     b.bypass.store (false);
     updateCoefficients (index);
     b.occupied.store (true);
+
+    // A new occupied band changes the curve, so let the editor know it must re-push.
+    bumpCurveRevision();
 }
 
 void EqEngine::removeBand (int index)
@@ -352,6 +362,9 @@ void EqEngine::removeBand (int index)
 
     bands[index].occupied.store (false);
     bands[index].activeStages.store (0, std::memory_order_relaxed);
+
+    // The band no longer contributes to any curve group.
+    bumpCurveRevision();
 
     // Never leave the listen target pointing at a slot that no longer exists.
     if (listenIndex.load (std::memory_order_relaxed) == index)
@@ -386,6 +399,16 @@ void EqEngine::setParam (int index, const juce::String& param, const juce::var& 
 
     if (index < 0 || index >= kMaxBands || ! bands[index].occupied.load())
         return;
+
+    // One unconditional bump for EVERY per-band parameter, before the branches below.
+    // Deliberately coarse (and cheap: one relaxed fetch_add):
+    //   * `mode` and `bypass` do NOT rebuild coefficients, yet they DO change the curve
+    //     (the group a band appears in, and whether it appears at all), so hanging the
+    //     revision off updateCoefficients() alone would miss them;
+    //   * a branch added here later automatically bumps without anyone remembering to.
+    // A redundant bump only costs one extra curve push; a missing one would freeze the
+    // displayed curve. See EqEngine.h getCurveRevision().
+    bumpCurveRevision();
 
     Band& b = bands[index];
 

@@ -204,6 +204,23 @@ public:
     // Returns true if any occupied band is boosting/cutting by at least 1 dB.
     bool hasNonUnityBand() const;
 
+    // --- Curve dirty-signal (WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md) ---
+    // Monotonic revision of every input the UI response curve depends on: the per-band
+    // parameters (type/freq/gain/q/slope/mode/bypass/occupied) and the sample rate.
+    // getCurveGains() reads the PUBLISHED coefficient objects, so anything that rebuilds
+    // them -- or that adds / removes / bypasses / re-routes a band -- bumps this.
+    //
+    // The editor compares it against the revision it last pushed and skips the whole
+    // 5 x 512-point recompute + 5 x 512-value payload + 5 IPC events when nothing
+    // changed. That idle path is the dominant cost of the 40 Hz UI timer, and with two
+    // editor windows open it was the bulk of the traffic on the host's message thread.
+    //
+    // Deliberately coarse and fail-safe: a redundant bump only costs one extra push,
+    // whereas a missed one would leave the curve stale -- so every band mutator bumps it
+    // unconditionally (even for parameters that happen not to change the curve), and the
+    // editor additionally re-pushes on a slow safety timer as a second net.
+    juce::uint32 getCurveRevision() const { return curveRevision.load (std::memory_order_relaxed); }
+
     // Temporary diagnostic (Phase 1): one-line description of the active bands,
     // including the first active band's b0 coefficient and its magnitude response
     // at its own centre frequency (in dB). Confirm the coefficients are non-unity.
@@ -230,11 +247,18 @@ private:
     void updateCoefficients (int index);
     void clearBandState (int index);
 
+    // Bumped by every mutator that can change the UI curve; see getCurveRevision().
+    void bumpCurveRevision() { curveRevision.fetch_add (1, std::memory_order_relaxed); }
+
 #if TOREI_EQ_DEBUG_LOG
     // Audio-thread probe accumulation: writes the block's L/R/M/S RMS (dBFS) into the
     // probe atomics. No allocation, no lock, no logging.
     void updateProbe (const juce::AudioBuffer<float>& buffer, bool post);
 #endif
+
+    // Curve dirty-signal, read by the message thread / bumped by whatever thread owns
+    // the mutator (setParam is the message thread, prepare is the audio thread).
+    std::atomic<juce::uint32> curveRevision { 1 };
 
     std::array<Band, kMaxBands> bands;
 
