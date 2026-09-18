@@ -31,6 +31,10 @@ var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
 var GT=[24,18,12,6,0,-6,-12,-18,-24];
+// 画布用的刻度表（DSH：原来是写在 draw 循环里的数组字面量 —— 每帧每个实例都分配一次，
+// 违反本项目"RAF 循环里零分配"的约定）。提到模块作用域，值一字未改。
+var GTC=[30,18,12,6,0,-6,-12,-18,-24,-30];
+var SPTC=[0,-3,-6,-10,-15,-18,-24,-30,-36,-48,-60,-72,-84,-96];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
 var FILTER_LABELS={peaking:"Bell",lowshelf:"Low Shelf",highshelf:"High Shelf",lowpass:"High Cut",highpass:"Low Cut"};
 
@@ -86,6 +90,9 @@ function mockCurve(bands,W){for(var i=0;i<W;i++){var f=20*Math.pow(10,(i/(W-1))*
 function useStore(){
   var B,setB,sel,setSel;var _r=useState([{id:0,type:"peaking",freq:1000,gain:0,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0}]);B=_r[0];setB=_r[1];
   _r=useState(null);sel=_r[0];setSel=_r[1];
+  // 多选。sel 永远是"主选"（右侧面板与节点 tip 显示它），selIds 才是操作集合：
+  // 单击 = 单选（selIds=[id]），菜单 Select All = 全选；反相增益 / 复制 / 删除都作用于 selIds。
+  var sids,setSids;_r=useState([]);sids=_r[0];setSids=_r[1];
   // Solo listen level (dB): how loud the soloed band is played back while holding
   // the headphone button. GLOBAL (not per band) and NOT an EQ gain -- it only makes
   // weak bands audible. Pushed with index=-1 so the DSP can tell it apart from a
@@ -109,13 +116,98 @@ function useStore(){
   // Adopt C++'s band list wholesale. C++ is the single source of truth for band state
   // (see STATE_PERSISTENCE_HANDOFF.md), so on mount the UI replaces its own array with
   // the DSP's instead of pushing local defaults at it.
-  var replaceBands=function(arr){CURVE_DIRTY=true;setB(arr)};
+  var replaceBands=function(arr){CURVE_DIRTY=true;setB(arr);setSids([]);setSel(null)};
   var update=function(id,chg){CURVE_DIRTY=true;setB(function(p){return p.map(function(b){return b.id===id?Object.assign({},b,chg):b})});for(var k in chg)sendParam(id,k,chg[k])};
-  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0};setB(function(p){return p.concat([b])});setSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
-  var rem=function(id){CURVE_DIRTY=true;setB(function(p){return p.filter(function(b){return b.id!==id})});setSel(function(p){return p===id?null:p});sendCmd("RemoveBand",{index:id})};
+  // 选中集合的两个基础件。bandById 显式循环而不是 B.find，避免在 for 循环里捕获索引。
+  var bandById=function(id){for(var i=0;i<B.length;i++)if(B[i].id===id)return B[i];return null};
+  var pickSel=function(id){setSel(id);setSids(id===null?[]:[id])};
+  var selIdsNow=function(){return sids.length?sids:(sel!==null?[sel]:[])};
+  var selCount=function(){return sids.length?sids.length:(sel!==null?1:0)};
+  var add=function(f,g,t){if(B.length>=24)return;t=t||"peaking";CURVE_DIRTY=true;var used={};for(var i=0;i<B.length;i++)used[B[i].id]=1;var nid=0;while(used[nid])nid++;var b={id:nid,type:t,freq:f,gain:g,q:1,slope:12,active:true,mute:false,solo:false,bypass:false,mode:"stereo",soloDb:0};setB(function(p){return p.concat([b])});pickSel(nid);sendCmd("AddBand",{index:nid,freq:f,gain:g,type:t,q:1})};
+  // 删除一批 band：本地一次清掉，DSP 端逐个 RemoveBand（命令按发送顺序到达）。
+  var removeMany=function(ids){if(!ids||!ids.length)return;CURVE_DIRTY=true;var k={};for(var i=0;i<ids.length;i++)k[ids[i]]=1;
+    setB(function(p){return p.filter(function(b){return !k[b.id]})});
+    setSids([]);setSel(null);
+    for(var i=0;i<ids.length;i++)sendCmd("RemoveBand",{index:ids[i]})};
+  var rem=function(id){removeMany([id])};
+  // 全选：selIds 覆盖所有 band。主选保持不动（右侧面板不跳），只有它已不在集合里才改选第一个。
+  var selectAll=function(){var ids=[];for(var i=0;i<B.length;i++)ids.push(B[i].id);if(!ids.length)return;
+    setSids(ids);if(sel===null||ids.indexOf(sel)<0)setSel(ids[0])};
+  // 反相增益：作用于当前选择（未多选时即主选），逐个走 update() 以便逐个同步到 DSP。
+  var invertGain=function(){var ids=selIdsNow();if(!ids.length)return;
+    for(var i=0;i<ids.length;i++){var b=bandById(ids[i]);if(b)update(b.id,{gain:-Math.round(b.gain*100)/100})}};
+  // ---- 一次性提示条（复制/粘贴/空剪贴板的反馈）----
+  var _tt=useState(null);var toast=_tt[0],setToast=_tt[1];
+  var toastT=useRef(null);
+  var showToast=function(msg){setToast(msg);if(toastT.current)clearTimeout(toastT.current);toastT.current=setTimeout(function(){setToast(null)},1800)};
+  useEffect(function(){return function(){if(toastT.current)clearTimeout(toastT.current)}},[]);
+  // ---- 复制 / 粘贴（跨实例复刻 EQ）----
+  // 通道优先级：
+  //  1) localStorage —— WebView2 的 user data folder 由宿主 exe 决定，本项目用 WinWebView2 默认值
+  //     （未自定义 UserDataFolder），所以同一宿主进程里的每个 TOREI-EQ 实例共用同一个 file:// 源
+  //     和同一块存储，localStorage 就是一块进程内的公共剪贴板：同步、无权限、无需 C++ 改动。
+  //  2) 系统剪贴板 —— best-effort（读可能被 WebView2 权限拦下），好处是能跨工程/跨宿主粘贴。
+  //  3) C++ 进程内剪贴板 —— Clipboard_Set / Clipboard_Get，可选加固，见 CLIPBOARD_HANDOFF.md。
+  var CLIP_KEY="torei_eq_clipboard_v1";
+  // 可选的 C++ 进程内剪贴板通道（Clipboard_Set / Clipboard_Get）。默认关：
+  // C++ 现在还没实现这两个命令，发了只会往 eq_debug.txt 写一行 "RECV Command (unknown)"
+  // （该行不受 TOREI_EQ_DEBUG_LOG 控制）。等 DSH 实现后把这里改成 true，UI 侧无需再改。
+  var CLIP_CPP_CHANNEL=false;
+  var writeClip=function(json){
+    try{localStorage.setItem(CLIP_KEY,json)}catch(e){}
+    try{if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(json).catch(function(){})}catch(e){}
+    if(CLIP_CPP_CHANNEL)sendCmd("Clipboard_Set",{json:json});
+  };
+  var readClipSync=function(){try{var v=localStorage.getItem(CLIP_KEY);if(v&&v.length>8)return v}catch(e){}return null};
+  var copyBands=function(){var ids=selIdsNow();if(!ids.length){showToast("Nothing selected");return}
+    var out=[];
+    for(var i=0;i<ids.length;i++){var b=bandById(ids[i]);
+      if(b)out.push({type:b.type,freq:b.freq,gain:b.gain,q:b.q,slope:b.slope,mode:b.mode,bypass:!!b.bypass})}
+    try{writeClip(JSON.stringify({torei:"eq-bands",v:1,bands:out}))}catch(e){showToast("Copy failed");return}
+    showToast("Copied "+out.length+(out.length>1?" bands":" band"))};
+  // 用剪贴板内容整体替换本实例的 EQ（"复刻"语义）。AddBand 只带 type/freq/gain/q，
+  // slope / mode / bypass 随后走参数通道补上；band 槽位重排为 0..n-1。
+  // C++ 进程内剪贴板回包（可选加固通道）：UI 已经在复制时发 Clipboard_Set、粘贴时发
+  // Clipboard_Get，这里接住 C++ 的 Clipboard_Data 回包。用 ref 取最新闭包 ——
+  // 用 [] 订阅时 applyClip 会锁死第一帧的 B，导致 RemoveBand 列表是错的。
+  var applyClipRef=useRef(null);
+  var applyClip=function(json){
+    var d=null;try{d=JSON.parse(json)}catch(e){}
+    if(!d||d.torei!=="eq-bands"||!d.bands||!d.bands.length){showToast("Clipboard has no EQ data");return}
+    var nb=[],n=Math.min(d.bands.length,24);
+    for(var i=0;i<n;i++){var s=d.bands[i]||{};
+      nb.push({id:i,type:(FILTER_TYPES.indexOf(s.type)>=0?s.type:"peaking"),
+        freq:Math.max(20,Math.min(20000,+s.freq||1000)),
+        gain:Math.max(-30,Math.min(30,+s.gain||0)),
+        q:Math.max(.1,Math.min(40,+s.q||1)),
+        slope:(s.slope==6||s.slope==24||s.slope==48?s.slope:12),
+        active:true,mute:false,solo:false,bypass:!!s.bypass,
+        mode:(s.mode==="L"||s.mode==="R"||s.mode==="mid"||s.mode==="side")?s.mode:"stereo",soloDb:0})}
+    var oldIds=[];for(var i=0;i<B.length;i++)oldIds.push(B[i].id);
+    CURVE_DIRTY=true;setB(nb);setSids(nb.length?[0]:[]);setSel(nb.length?0:null);
+    for(var i=0;i<oldIds.length;i++)sendCmd("RemoveBand",{index:oldIds[i]});
+    for(var i=0;i<nb.length;i++){var b=nb[i];
+      sendCmd("AddBand",{index:b.id,freq:b.freq,gain:b.gain,type:b.type,q:b.q});
+      sendParam(b.id,"slope",b.slope);sendParam(b.id,"mode",b.mode);
+      if(b.bypass)sendParam(b.id,"bypass",true)}
+    showToast("Pasted "+nb.length+(nb.length>1?" bands":" band"))};
+  var pasteBands=function(){
+    var s=readClipSync();
+    if(s){applyClip(s);return}
+    var got=false;
+    try{if(navigator.clipboard&&navigator.clipboard.readText){
+      navigator.clipboard.readText().then(function(t){if(t&&!got){got=true;applyClip(t)}}).catch(function(){})}}catch(e){}
+    if(CLIP_CPP_CHANNEL)sendCmd("Clipboard_Get",{});
+    setTimeout(function(){if(!got)showToast("Clipboard empty — copy bands first")},450)};
+  applyClipRef.current=applyClip;
+  useEffect(function(){
+    if(typeof __JUCE__==="undefined"||!__JUCE__.backend||!__JUCE__.backend.addEventListener)return;
+    __JUCE__.backend.addEventListener("Clipboard_Data",function(o){
+      if(o&&typeof o.json==="string"){var t=readClipSync();if(!t)applyClipRef.current(o.json)}});
+  },[]);
   var toggle=function(id){update(id,{active:!B.find(function(b){return b.id===id}).active})};
   var toggleBypass=function(id){update(id,{bypass:!B.find(function(b){return b.id===id}).bypass})};
-  return{B:B,sel:sel,selB:B.find(function(b){return b.id===sel})||null,setSel:setSel,update:update,add:add,remove:rem,toggle:toggle,toggleBypass:toggleBypass,setBandSoloLevel:setBandSoloLevel,outputGain:og,setOutputGain:setOutputGain,adoptOutputGain:adoptOutputGain,selSoloDb:(B.find(function(b){return b.id===sel})||{soloDb:0}).soloDb||0,listening:lst,setListening:setLst,replaceBands:replaceBands};
+  return{B:B,sel:sel,selB:B.find(function(b){return b.id===sel})||null,selIds:sids,setSel:pickSel,selCount:selCount,selectAll:selectAll,invertGain:invertGain,copyBands:copyBands,pasteBands:pasteBands,removeMany:removeMany,toast:toast,update:update,add:add,remove:rem,toggle:toggle,toggleBypass:toggleBypass,setBandSoloLevel:setBandSoloLevel,outputGain:og,setOutputGain:setOutputGain,adoptOutputGain:adoptOutputGain,selSoloDb:(B.find(function(b){return b.id===sel})||{soloDb:0}).soloDb||0,listening:lst,setListening:setLst,replaceBands:replaceBands};
 }
 
 var peakRef={rms:-3,peak:-3,hold:-3,frames:0};
@@ -340,6 +432,10 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // through applyListen() keeps the headphone button, the S key and the pointerup
   // safety net in sync from one single place.
   var listenRef=useRef(null);
+  // 监听是"按住式"的，但有两个来源：鼠标按住耳机按钮、或按住 S 键。
+  // window 级的 pointerup 兜底只应结束"指针来源"的监听 —— 否则按住 S 键期间鼠标
+  // 随便一松就会把监听清掉（见 LISTEN_FEATURE_HANDOFF.md §0.13）。
+  var listenByPtrRef=useRef(false);
   var applyListen=function(id){if(listenRef.current===id)return;if(listenRef.current!==null)sendParam(listenRef.current,"listen",false);if(id!==null){sendParam(id,"listen",true);var _lb=null;for(var _li=0;_li<store.B.length;_li++)if(store.B[_li].id===id){_lb=store.B[_li];break}sendParam(-1,"soloLevel",_lb?(_lb.soloDb||0):0)}listenRef.current=id;setListenId(id)};
   useEffect(function(){store.setListening(listenId!==null)},[listenId]);
   // C++ -> UI: the DSP can clear listen by itself (e.g. the listened band was
@@ -347,7 +443,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // to C++ -- routing this through applyListen() would send the change straight back
   // and could ping-pong with the DSP.
   useEffect(function(){
-    var h=function(o){var idx=(o&&typeof o.index==="number")?o.index:-1;if(idx<0&&listenRef.current===null)return;if(idx===listenRef.current)return;listenRef.current=idx<0?null:idx;setListenId(idx<0?null:idx)};
+    var h=function(o){var idx=(o&&typeof o.index==="number")?o.index:-1;if(idx<0&&listenRef.current===null)return;if(idx===listenRef.current)return;listenByPtrRef.current=false;listenRef.current=idx<0?null:idx;setListenId(idx<0?null:idx)};
     if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.addEventListener("EQ_Listen_State",h);
   },[]);
   var tipTimer=useRef(null);
@@ -356,10 +452,10 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var showTip=function(id){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}setTipFade(false);setTip(id)};
   var fadeTip=function(d){clearFade();if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}fadeTimer.current=setTimeout(function(){setTipFade(true);fadeTimer.current=setTimeout(function(){setTip(null)},350)},d)};
   useEffect(function(){return function(){if(tipTimer.current)clearTimeout(tipTimer.current)}},[]);
-  useEffect(function(){var h=function(){applyListen(null)};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
+  useEffect(function(){var h=function(){if(listenByPtrRef.current){listenByPtrRef.current=false;applyListen(null)}};window.addEventListener("pointerup",h);return function(){window.removeEventListener("pointerup",h)}},[]);
   useEffect(function(){
-    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel!==null)applyListen(store.sel)}};
-    var ku=function(e){if(e.key==="s"||e.key==="S")applyListen(null)};
+    var kd=function(e){if(e.repeat)return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.key==="s"||e.key==="S"){if(store.sel!==null){listenByPtrRef.current=false;applyListen(store.sel)}}};
+    var ku=function(e){if(e.key==="s"||e.key==="S"){listenByPtrRef.current=false;applyListen(null)}};
     window.addEventListener("keydown",kd);window.addEventListener("keyup",ku);
     return function(){window.removeEventListener("keydown",kd);window.removeEventListener("keyup",ku)}
   },[store.sel]);
@@ -370,8 +466,20 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     var hasCpp=ok&&bindSpectrumFromCpp();
     bindLevelFromCpp();bindCurveFromCpp();
     if(!hasCpp){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}}var rid2;var u=function(){rid2=requestAnimationFrame(u);if(!hasCpp)updatePeak()};rid2=requestAnimationFrame(u);return function(){cancelAnimationFrame(rid2)}});},[]);
+  // 渲染超采样倍数（3/2/1）。它决定画布后备存储的像素量 —— 也就是每个实例每帧要
+  // 合成/搬运的字节数（SS=3 时 8.3M 像素 ≈ 33 MB/帧/实例）。实例多、界面开始卡顿时把它
+  // 降到 2 或 1 能成比例减轻；Ctrl+Alt+S 或右键菜单里的"Render quality"可实时切换，会记忆。
+  var _ss=useState(function(){try{var v=parseFloat(localStorage.getItem("torei_ss"));return(v===1||v===2||v===3)?v:3}catch(e){return 3}});
+  var ssVal=_ss[0],setSsVal=_ss[1];
+  // draw 里必须读到"最新"的 store / listen，但本 effect 不能把它们放进依赖数组：
+  // 依赖 store 会让**每一次拖拽（40~60 Hz 的状态变更）都重新执行整个 effect** ——
+  // 而 effect 开头就重设 canvas.width，那会清空并重新分配整块后备存储、并重建 RAF 循环。
+  // 实测：一次点击 = 6 次画布重新分配；拖动时每秒数百次。5 个实例叠加就是肉眼可见的卡顿。
+  // 所以：依赖里只留 [dims, ssVal]，状态一律经 ref 取最新值。
+  var storeRefLive=useRef(store);storeRefLive.current=store;
+  var drawListenRef=useRef(null);drawListenRef.current=listenId;
   useEffect(function(){if(dims.w<80)return;
-  var SS=3,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
+  var SS=ssVal,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
   // Round joins/caps keep polyline vertices smooth; supersampling (SS) gives the
   // anti-aliaser sub-pixel headroom so a sloping stroke does not show a periodic ripple.
   // NOTE: the "staircase" the curve used to show was NOT a rendering problem -- it came
@@ -380,20 +488,69 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // 0.01 dB), so no blur/downstream softening is needed any more. See
   // CURVE_STAIRSTEP_HANDOFF.md.
   ctx.lineJoin="round";ctx.lineCap="round";
-  var rid,draw=function(){rid=requestAnimationFrame(draw);
-  var W=dims.w,H=dims.h,b=store.B,i;
+  // ===== 帧率预算 + 变化检测（DSH 加，见 WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §18）=====
+  // 每个可见实例的成本 ≈ 每帧成本 × 帧率。这里以前**没有任何帧率上限**：RAF 跑到显示刷新率
+  // （60~144 Hz），而这个循环每帧都把整个画布重画一遍（网格 + 刻度 + 两条频谱 + 4 条曲线 +
+  // 节点；SS=3 时后备存储 8.3M 像素）。但数据源只有 ~38 Hz（C++ 频谱），静止时更是零
+  // —— 所以绝大部分帧是白画的。
+  // 另据 Hermes §16.4 的实测：渲染进程 CPU 对画布尺寸不敏感 ⇒ 成本主要在"每帧的绘制工作"
+  // 那一项，砍帧率正好直接命中它（像素量那项由 SS 开关单独控制，两者互不干扰）。
+  //   正在交互（指针/滚轮/按键，500ms 内）→ 不限帧：拖节点的手感优先
+  //   有焦点（= 用户正在操作的那一个实例）→ 30 fps：频谱看起来与 60 无异
+  //   无焦点（= 场上其它实例）            → 12 fps：没人看，但保留基本更新
+  var INTERACT_MS=500,FPS_FOCUSED=30,FPS_IDLE=12;
+  var lastInteractT=-1e9,lastDrawT=0,prevSig=null,prevStore=null,prevListen=null;
+  var markInteract=function(){lastInteractT=performance.now()};
+  var hasFocusFn=(typeof document.hasFocus==="function")?function(){try{return !!document.hasFocus()}catch(e){return true}}:function(){return true};
+  // 把"焦点判定"写进 C++ 日志（UI_Log 只诊断构建才落盘）：WebView2 里 document.hasFocus()
+  // 到底准不准，可以直接从 eq_debug.txt 看出来，不用猜。
+  var logActive=function(){var f=hasFocusFn();
+    try{if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.emitEvent("UI_Log",{msg:"draw focus="+(f?1:0)+" -> "+(f?FPS_FOCUSED:FPS_IDLE)+"fps"})}catch(e){}};
+  var onWinFocus=function(){markInteract();logActive()};
+  var onWinBlur=function(){logActive()};
+  window.addEventListener("pointerdown",markInteract,true);
+  window.addEventListener("pointermove",markInteract,true);
+  window.addEventListener("wheel",markInteract,true);
+  window.addEventListener("keydown",markInteract,true);
+  window.addEventListener("focus",onWinFocus);
+  window.addEventListener("blur",onWinBlur);
+  logActive();
+  var rid,draw=function(){
+  rid=requestAnimationFrame(draw);
+  var _tNow=performance.now();
+  // 1) 帧率上限（交互中为 0 = 不限帧）
+  var _minInterval=((_tNow-lastInteractT)<INTERACT_MS)?0:(hasFocusFn()?1000/FPS_FOCUSED:1000/FPS_IDLE);
+  if(_tNow-lastDrawT<_minInterval)return;
+  // 取最新状态：本 effect 的依赖里已没有 store/listenId（见上），直接用闭包里的会读到旧值。
+  var store=storeRefLive.current,listenId=drawListenRef.current,W=dims.w,H=dims.h,b=store.B,i;
+  // 2) 变化检测：数据源四类 + 状态。用"抽样求和"而不是逐点比较，几十次浮点加法即可。
+  //    曲线必须抽 EQCURVE_* 源数组：CV_* 是在下面 applyEqCurve() 里才算出来的，抽它会永远
+  //    看不到新数据（宿主改了曲线而 UI 状态没变时，例如采样率变化，就会漏掉这次重画）。
+  var _sig=0,_j;
+  for(_j=0;_j<SP_LEN;_j+=16)_sig+=SP[_j]*1.7;
+  for(_j=0;_j<IPS_LEN;_j+=16)_sig-=IPS[_j]*1.3;
+  for(_j=0;_j<EQCURVE_LEN;_j+=16)_sig+=EQCURVE[_j]*.9;
+  for(_j=0;_j<EQCURVE_LEN_S;_j+=8)_sig+=EQCURVE_S[_j]*.3;
+  for(_j=0;_j<EQCURVE_LEN_L;_j+=8)_sig+=EQCURVE_L[_j]*.2;
+  for(_j=0;_j<EQCURVE_LEN_R;_j+=8)_sig+=EQCURVE_R[_j]*.17;
+  // 数据刚停止变化的 600ms 内必须继续画：M/S 判决的滞回死区与"解冻"要靠这段时间跑完
+  // （否则拖动结束后那一次"颜色归位"永远不执行）。
+  var _settling=(_tNow-_lastChangeT)<600;
+  if(_sig===prevSig&&store===prevStore&&listenId===prevListen&&!_settling)return;
+  prevSig=_sig;prevStore=store;prevListen=listenId;lastDrawT=_tNow;
   ctx.clearRect(0,0,W,H);
+
   for(i=0;i<FT.length;i++){var x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.strokeStyle="rgba(255,255,255,.04)";ctx.stroke()}
   for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?"bold 10px monospace":"9px monospace";ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]]){var lx=Math.min(x,W-40);if(x>W-40)ctx.textAlign="right";ctx.fillText(FL[FT[i]],lx,H-6)}}
   // 左侧 EQ 增益刻度（±30，与右侧频谱 dBFS 空间对齐，Pro-Q 双刻度）
   // g2y: 0 增益在中、+30 顶、-30 底；0 增益线橙色高亮为主要参考线
-  var GT=[30,18,12,6,0,-6,-12,-18,-24,-30];
+  var GT=GTC;
   for(i=0;i<GT.length;i++){var g=GT[i],gy=g2y(g)*H,ly=Math.max(6,Math.min(H-6,gy));
     ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(6,gy);ctx.strokeStyle=g===0?"rgba(234,179,8,.7)":"rgba(255,255,255,.16)";ctx.lineWidth=g===0?1.5:1;ctx.stroke();
     ctx.fillStyle=g===0?"rgba(234,179,8,.85)":"rgba(255,255,255,.42)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(g===0?"0":(g>0?"+"+g:String(g)),8,ly)}
   // 频谱纵轴 = 0dBFS 顶 / -96dBFS 底（线性），宽量程让音乐的 -25~-65dB 频谱落在中上部，而非贴底
   var sp2y=function(d){return Math.max(-96,Math.min(0,d))/(-96)};
-  var SPT=[0,-3,-6,-10,-15,-18,-24,-30,-36,-48,-60,-72,-84,-96];
+  var SPT=SPTC;
   for(i=0;i<SPT.length;i++){var sd=SPT[i],sy=sp2y(sd)*H;
     if(sd===0){ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1}
     else{ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(255,229,185,.07)";ctx.stroke()}
@@ -482,24 +639,71 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     if(lrDiff){drawC(CV_R,"168,85,247",fLR);drawC(CV_L,"249,115,22",fLR)}
     ctx.globalAlpha=1;
   }
-  for(i=0;i<b.length;i++){var bn=b[i];if(!bn.active||bn.mute)continue;var nx=f2x(bn.freq)*W,ny=g2y(bn.gain)*H,isSel=bn.id===store.sel;var nodeAlpha=listenId&&bn.id!==listenId?.15:(bn.bypass?.35:1);
+  for(i=0;i<b.length;i++){var bn=b[i];if(!bn.active||bn.mute)continue;var nx=f2x(bn.freq)*W,ny=g2y(bn.gain)*H,isSel=bn.id===store.sel,isMulti=!isSel&&store.selIds.indexOf(bn.id)>=0;var nodeAlpha=listenId&&bn.id!==listenId?.15:(bn.bypass?.35:1);
     if(isSel){var hrg=ctx.createRadialGradient(nx,ny,2,nx,ny,26);hrg.addColorStop(0,"rgba("+BC[i%8]+",.55)");hrg.addColorStop(1,"rgba("+BC[i%8]+",0)");ctx.fillStyle=hrg;ctx.beginPath();ctx.arc(nx,ny,26,0,Math.PI*2);ctx.fill()}
-    ctx.globalAlpha=nodeAlpha;ctx.beginPath();ctx.arc(nx,ny,isSel?9:7,0,Math.PI*2);ctx.fillStyle="rgb("+BC[i%8]+")";ctx.shadowColor="rgba("+BC[i%8]+",.9)";ctx.shadowBlur=isSel?15:0;ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=isSel?"#fff":"rgba(255,255,255,.85)";ctx.lineWidth=2;ctx.stroke();ctx.globalAlpha=1;
+    ctx.globalAlpha=nodeAlpha;ctx.beginPath();ctx.arc(nx,ny,isSel?9:(isMulti?8:7),0,Math.PI*2);ctx.fillStyle="rgb("+BC[i%8]+")";ctx.shadowColor="rgba("+BC[i%8]+",.9)";ctx.shadowBlur=isSel?15:0;ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=isSel?"#fff":"rgba(255,255,255,.85)";ctx.lineWidth=2;ctx.stroke();ctx.globalAlpha=1;
     if(bn.mode!=="stereo"){var _mt=bn.mode==="mid"?{t:"M",c:"#22c55e",o:-13}:(bn.mode==="side"?{t:"S",c:"#38bdf8",o:13}:(bn.mode==="L"?{t:"L",c:"#f97316",o:-13}:{t:"R",c:"#a855f7",o:13})),lbl=_mt.t,lc=_mt.c,lx=nx+_mt.o,ly=ny;
       ctx.font="bold 9px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
       ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(lx-7,ly-6,14,12);
       ctx.strokeStyle=lc;ctx.lineWidth=1;ctx.strokeRect(lx-7,ly-6,14,12);
       ctx.fillStyle=lc;ctx.fillText(lbl,lx,ly)}
-    if(isSel){ctx.beginPath();ctx.arc(nx,ny,13,0,Math.PI*2);ctx.strokeStyle="rgba(255,255,255,.4)";ctx.lineWidth=1;ctx.stroke()}
+    if(isSel||isMulti){ctx.beginPath();ctx.arc(nx,ny,isSel?13:11,0,Math.PI*2);ctx.strokeStyle=isSel?"rgba(255,255,255,.4)":"rgba(255,255,255,.22)";ctx.lineWidth=1;ctx.stroke()}
   }
   if(listenId!==null){var lb=null,li=0;for(i=0;i<b.length;i++)if(b[i].id===listenId){lb=b[i];li=i}
     if(lb){var lbw=.6/Math.max(.1,lb.q||1),lf1=lb.freq/Math.pow(2,lbw),lf2=lb.freq*Math.pow(2,lbw),lx1=Math.max(0,f2x(lf1)*W),lx2=Math.min(W,f2x(lf2)*W);
     ctx.fillStyle="rgba(4,5,7,.62)";ctx.fillRect(0,0,lx1,H);ctx.fillRect(lx2,0,W-lx2,H);
     ctx.strokeStyle="rgba("+BC[li%8]+",.95)";ctx.lineWidth=1.5;ctx.shadowColor="rgba("+BC[li%8]+",.8)";ctx.shadowBlur=8;ctx.beginPath();ctx.moveTo(lx1,0);ctx.lineTo(lx1,H);ctx.moveTo(lx2,0);ctx.lineTo(lx2,H);ctx.stroke();ctx.shadowBlur=0}}
-  };rid=requestAnimationFrame(draw);return function(){cancelAnimationFrame(rid)}},[dims,store.B,store.sel,listenId]);
+  };rid=requestAnimationFrame(draw);
+  return function(){cancelAnimationFrame(rid);
+    window.removeEventListener("pointerdown",markInteract,true);
+    window.removeEventListener("pointermove",markInteract,true);
+    window.removeEventListener("wheel",markInteract,true);
+    window.removeEventListener("keydown",markInteract,true);
+    window.removeEventListener("focus",onWinFocus);
+    window.removeEventListener("blur",onWinBlur)}},[dims,ssVal]);
   var hitTest=function(mx,my){for(var i=store.B.length-1;i>=0;i--){var b=store.B[i];if(!b.active||b.mute)continue;if(Math.hypot(mx-f2x(b.freq)*dims.w,my-g2y(b.gain)*dims.h)<14)return b}return null};
   var drag=useRef(null);
-  var onPD=function(e){e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1000);drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
+  // store 的最新引用。下面几个 window 级 effect 只订阅一次（deps=[]），靠 storeRef 取当前渲染
+  // 的 store —— 用 [] 直接闭包会把第一帧的 B / selIds 锁死（全选只能选中初始的那个 band）。
+  var storeRef=useRef(store);storeRef.current=store;
+  // ---- 右键菜单（Select All / Invert Gain / Copy / Paste）----
+  var _cm=useState(null);var ctxMenu=_cm[0],setCtxMenu=_cm[1];
+  var onCM=function(e){e.preventDefault();e.stopPropagation();
+    var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);
+    // 右键落在节点上：先把它选为主选（Pro-Q 手感），再弹菜单
+    if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1200)}
+    setCtxMenu({x:mx,y:my})};
+  // 菜单外点击 / Esc / 在别处右键 → 关闭。白名单 .eqctx 保证菜单项自己的点击不被这次关闭抢跑。
+  useEffect(function(){
+    if(ctxMenu===null)return;
+    var h=function(e){if(e.target&&e.target.closest&&e.target.closest(".eqctx"))return;setCtxMenu(null)};
+    var k=function(e){if(e.key==="Escape")setCtxMenu(null)};
+    window.addEventListener("pointerdown",h,true);window.addEventListener("contextmenu",h,true);window.addEventListener("keydown",k);
+    return function(){window.removeEventListener("pointerdown",h,true);window.removeEventListener("contextmenu",h,true);window.removeEventListener("keydown",k)}
+  },[ctxMenu]);
+  // Ctrl/Cmd + A / C / V = 全选 / 复制 / 粘贴（在输入框里打字时不拦截）
+  // Ctrl + Alt + S = 循环切换渲染质量 3x -> 2x -> 1x（画布像素量成平方下降：9x -> 4x -> 1x），
+  // 实例多、界面卡顿时用它换流畅度；选择会记忆在 localStorage（同一用户数据目录下所有实例共享）。
+  useEffect(function(){
+    var kd=function(e){if(!(e.ctrlKey||e.metaKey))return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;
+      var k=(e.key||"").toLowerCase();
+      if(k==="s"&&e.altKey){e.preventDefault();
+        setSsVal(function(v){var n=v===3?2:(v===2?1:3);try{localStorage.setItem("torei_ss",String(n))}catch(e2){}return n});return}
+      if(k==="a"){e.preventDefault();storeRef.current.selectAll()}
+      else if(k==="c"){e.preventDefault();storeRef.current.copyBands()}
+      else if(k==="v"){e.preventDefault();storeRef.current.pasteBands()}};
+    window.addEventListener("keydown",kd);
+    return function(){window.removeEventListener("keydown",kd)}
+  },[]);
+  // 菜单行
+  var mi=function(key,label,right,on,act){return m("div",{key:key,onClick:function(){if(!on)return;setCtxMenu(null);act()},
+    style:{display:"flex",alignItems:"center",gap:8,padding:"7px 9px",borderRadius:7,cursor:on?"pointer":"default",opacity:on?1:.38,userSelect:"none",whiteSpace:"nowrap"},
+    onMouseEnter:function(e){if(on)e.currentTarget.style.background="#32363f"},
+    onMouseLeave:function(e){e.currentTarget.style.background="transparent"}},
+    m("span",{style:{flex:1}},label),
+    right?m("span",{style:{color:"#64748b",fontSize:10,letterSpacing:.3}},right):null)};
+  var selN=store.selCount();
+  var onPD=function(e){if(e.button!==0)return;if(e.target&&e.target.closest&&e.target.closest(".eqctx"))return;e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1000);drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
   var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov")){clearFade();setTipFade(false);return;}var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);if(nid!==null){if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}tipTimer.current=setTimeout(function(){showTip(nid)},120)}else{fadeTip(900)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
   var onPU=function(){drag.current=null;setActiveId(null)};
   var onPL=function(){setHoverId(null);fadeTip(700)};
@@ -514,10 +718,20 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var showTipId=tip!==null?tip:(activeId!==null?activeId:store.sel),tipB=null,tipIdx=0,i2;
   if(showTipId!==null)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
   return m("div",{className:"flex-1",style:{display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
-    m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onWheel:onWheel},
+    m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onContextMenu:onCM,onWheel:onWheel},
       m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
-      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:applyListen,fade:tipFade}):null,
-      store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null
+      tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:function(id){listenByPtrRef.current=(id!==null);applyListen(id)},fade:tipFade}):null,
+      store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null,
+      ctxMenu?m("div",{className:"eqctx tdropanim",onPointerDown:stopE,style:{position:"absolute",left:Math.max(4,Math.min(ctxMenu.x,dims.w-200)),top:Math.max(4,Math.min(ctxMenu.y,dims.h-196)),zIndex:40,width:196,background:"#252830",border:"1px solid rgba(148,163,184,.28)",borderRadius:10,boxShadow:"0 18px 36px rgba(0,0,0,.65)",padding:5,fontSize:12,color:"#e2e8f0"}},
+        mi("all","Select All",store.B.length?store.B.length+" bands":null,store.B.length>0&&store.selIds.length<store.B.length,function(){store.selectAll()}),
+        mi("inv","Invert Gain",selN?selN+" selected":null,selN>0,function(){store.invertGain()}),
+        m("div",{key:"sep",style:{height:1,background:"rgba(148,163,184,.18)",margin:"4px 6px"}}),
+        mi("copy","Copy","Ctrl+C",selN>0,function(){store.copyBands()}),
+        mi("paste","Paste","Ctrl+V",true,function(){store.pasteBands()}),
+        m("div",{key:"sep2",style:{height:1,background:"rgba(148,163,184,.18)",margin:"4px 6px"}}),
+        mi("ss","Render quality",ssVal+"x",true,function(){setSsVal(function(v){var n=v===3?2:(v===2?1:3);try{localStorage.setItem("torei_ss",String(n))}catch(e2){}return n})})
+      ):null,
+      store.toast?m("div",{style:{position:"absolute",left:"50%",transform:"translateX(-50%)",bottom:16,zIndex:50,padding:"7px 14px",borderRadius:8,background:"rgba(15,17,22,.94)",border:"1px solid rgba(148,163,184,.3)",color:"#e2e8f0",fontSize:12,pointerEvents:"none",boxShadow:"0 10px 24px rgba(0,0,0,.6)"}},store.toast):null
     ),
     m("div",{style:{width:86,flex:"0 0 86px",display:"flex",alignItems:"stretch",justifyContent:"center",borderLeft:"1px solid rgba(255,255,255,.06)",background:"#0d0f14"}},
       m(LevelMeter,{H:dims.h})
@@ -530,7 +744,12 @@ function App(){
   var _po=useState({});var panelOffsets=_po[0],setPanelOffsets=_po[1];
   var _bo=useState(false);var bridgeOffline=_bo[0],setBridgeOffline=_bo[1];
   var setPanelOffset=function(id,x){setPanelOffsets(function(prev){var n=Object.assign({},prev);n[id]=x;return n})};
-  useEffect(function(){var h=function(e){if(e.key==="Delete"||e.key==="Backspace"){if(!e.repeat&&store.sel)store.remove(store.sel)}};window.addEventListener("keydown",h);return function(){window.removeEventListener("keydown",h)}},[store.sel]);
+  // Delete / Backspace 删除整个选中集合（Select All 后即清空 EQ）。
+  // 注意：焦点在输入框里时不能删 —— 面板里正在编辑数值时按 Backspace 会误删 band。
+  useEffect(function(){var h=function(e){if(e.key!=="Delete"&&e.key!=="Backspace")return;
+    var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.repeat)return;
+    var ids=store.selIds.length?store.selIds:(store.sel!==null?[store.sel]:[]);if(ids.length)store.removeMany(ids)};
+    window.addEventListener("keydown",h);return function(){window.removeEventListener("keydown",h)}},[store.sel,store.selIds]);
   /** Wait for the DSP bridge, then declare the initial EQ bands. If the bridge
       never becomes ready, flag the UI as offline (simulated data) so the user can
       tell that the visible curve/spectrum are NOT coming from the DSP. */

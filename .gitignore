@@ -10,6 +10,7 @@ out/
 # Debug / temporary test artifacts
 build_log.txt
 build_out.txt
+build_out_rel.txt
 build_error.log
 eq_debug.txt
 eq_debug*.txt
@@ -18,6 +19,8 @@ spectrum_test.*
 ui/test.html
 ui/react-test.html
 commit_msg.txt
+CLIPBOARD_HANDOFF.md
+WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md
 
 # Local-only docs (kept on disk, not tracked in the repo)
 CONTRACT.md
@@ -70,6 +73,8 @@ venv/
 
 # WebUI (generated)
 webui/index.html
+# 部署前的一份 UI 备份（回滚用：直接拷回 VST3 目录即可），不进版本库
+webui/index.html.bak*
 
 # OS
 .DS_Store
