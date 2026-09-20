@@ -90,6 +90,36 @@ struct TickTimer
 #endif
 };
 
+// 窗口尺寸持久化：%APPDATA%\TOREI-EQ\editor_size.txt，内容形如 "1500x900"。
+// 宿主创建编辑器后会按编辑器上报的尺寸开窗，所以只要在构造时 setSize 到上次的尺寸，
+// 下次打开就还是那个尺寸 —— 不需要宿主配合保存窗口位置。
+static juce::File editorSizeFile()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+             .getChildFile ("TOREI-EQ")
+             .getChildFile ("editor_size.txt");
+}
+
+// 尺寸持久化的三个阈值（"只在用户真的拖了窗口时才写"靠它们 + 左键判据）
+static constexpr int    kSizeMinDeltaPx = 2;       // 小于 2px 的变化视为噪声（拖动时真有 ±1~3px 抖动）
+static constexpr double kSizeGraceMs    = 500.0;   // 打开后这段时间内一律不写（避开宿主创建编辑器时的 setSize）
+static constexpr double kSizeThrottleMs = 500.0;   // 两次写盘最小间隔
+
+// 当前显示器的工作区。构造时编辑器还没有 peer，所以按"鼠标所在显示器"取，取不到退回主显示器。
+// 恢复尺寸时用它做二次夹制：在大屏设的尺寸挪到小屏上就不会溢出屏幕。
+static juce::Rectangle<int> currentDisplayWorkArea()
+{
+    auto& displays = juce::Desktop::getInstance().getDisplays();
+
+    if (auto* d = displays.getDisplayForPoint (juce::Desktop::getInstance().getMousePosition(), false))
+        return d->userArea;
+
+    if (auto* d = displays.getPrimaryDisplay())
+        return d->userArea;
+
+    return { 0, 0, 1920, 1080 };
+}
+
 ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& p)
     : AudioProcessorEditor(&p)
     , processorRef(p)
@@ -103,6 +133,62 @@ ToreiEQAudioProcessorEditor::ToreiEQAudioProcessorEditor(ToreiEQAudioProcessor& 
     setSize(1500, 1000);
     setResizable(true, true);
     setResizeLimits(900, 600, 3000, 2000);
+
+    // 读回上次用户调整后的尺寸（文件缺失/非法就保留上面的默认值）。解析出的原始值必须先
+    // 判正再夹到 setResizeLimits 的上下界里 —— 否则 "abc" 会被 getIntValue() 读成 0，
+    // 再夹一下就变成一个合法的 900x600 把窗口改小。
+    editorCreatedMs = juce::Time::getMillisecondCounterHiRes();
+
+    {
+        const auto txt = editorSizeFile().loadFileAsString().trim();
+        const int xp = txt.indexOfChar ('x');
+
+        if (xp > 0)
+        {
+            const int rw = txt.substring (0, xp).getIntValue();
+            const int rh = txt.substring (xp + 1).getIntValue();
+
+            if (rw > 0 && rh > 0)
+            {
+                // 第一层：setResizeLimits 的上下界；第二层：当前显示器工作区（大屏设的尺寸挪到小屏
+                // 不会溢出屏幕），但不会低于我们的最小尺寸。
+                const auto wa = currentDisplayWorkArea();
+
+                const int w = juce::jlimit (900, juce::jmax (900, wa.getWidth()),  juce::jlimit (900, 3000, rw));
+                const int h = juce::jlimit (600, juce::jmax (600, wa.getHeight()), juce::jlimit (600, 2000, rh));
+
+                setSize (w, h);
+            }
+        }
+
+        lastSavedEditorW = getWidth();
+        lastSavedEditorH = getHeight();
+        prevTickW = lastSavedEditorW;
+        prevTickH = lastSavedEditorH;
+    }
+}
+
+// 把当前窗口尺寸落盘。调用点已经做了判据（左键/稳定/≥2px/开场窗口），这里只管写。
+void ToreiEQAudioProcessorEditor::writeEditorSize()
+{
+    lastEditorSizeWriteMs = juce::Time::getMillisecondCounterHiRes();
+    lastSavedEditorW = getWidth();
+    lastSavedEditorH = getHeight();
+
+    auto f = editorSizeFile();
+    f.getParentDirectory().createDirectory();
+    f.replaceWithText (juce::String (lastSavedEditorW) + "x" + juce::String (lastSavedEditorH));
+}
+
+// 与上次写入（或构造时应用）的尺寸相差 ≥2px。拖动窗口时实测有 ±1~3px 的连续抖动，
+// 用 int 直接比较会把噪声全部当成"变化"⇒ 每 500ms 一次无效写盘（还会污染常开的 SLOWTICK 判据）。
+bool ToreiEQAudioProcessorEditor::editorSizeDiffersEnough() const
+{
+    const int dw = getWidth()  - lastSavedEditorW;
+    const int dh = getHeight() - lastSavedEditorH;
+
+    return (dw >= kSizeMinDeltaPx || dw <= -kSizeMinDeltaPx
+         || dh >= kSizeMinDeltaPx || dh <= -kSizeMinDeltaPx);
 }
 
 void ToreiEQAudioProcessorEditor::ensureWebView()
@@ -223,6 +309,14 @@ ToreiEQAudioProcessorEditor::~ToreiEQAudioProcessorEditor()
         webView->goToURL ("about:blank");
     }
 
+    // 关窗前把最后尺寸落盘（拖完立刻关窗时，上面那个 tick 还没轮到）。判据同 timerCallback：
+    // 只有"用户拖动引起的、还没写过的尺寸"才写 —— 写完会清掉 userResizeArmed，所以宿主在关窗
+    // 时的程序化改动不会被误记。
+    if (userResizeArmed
+        && juce::Time::getMillisecondCounterHiRes() - editorCreatedMs > kSizeGraceMs
+        && editorSizeDiffersEnough())
+        writeEditorSize();
+
     stopTimer();
 }
 
@@ -231,6 +325,38 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     TickTimer tickTimer;
 
     ensureWebView();
+
+    // 尺寸持久化：只认"用户在拖窗口"引起的尺寸变化（宿主自己摆窗口 / 恢复工程布局不算）——
+    //   ① 尺寸**发生变化的那一刻**左键必须按下（或刚松开 400ms 内）⇒ 判定为用户在拖。
+    //      注意：判定必须挂在"变化"上，不能只要求"左键按下过 + 尺寸与文件不同" ——
+    //      否则"宿主程序化改了尺寸 + 用户随手点一下"也会被误记（实测抓到过）。
+    //   ② 尺寸要连续两个 tick 不变（拖动过程中不写，避免每 500ms 一次无效写盘）
+    //   ③ 与上次写入相差 ≥2px（实测拖动时真有 ±1~3px 抖动，int 直接比较会把噪声当变化）
+    //   ④ 打开后 ≥500ms（避开宿主创建编辑器那一轮 setSize）
+    {
+        const int w = getWidth(), h = getHeight();
+        const double now = juce::Time::getMillisecondCounterHiRes();
+
+        if (juce::ModifierKeys::getCurrentModifiersRealtime().isLeftButtonDown())
+            lastMouseDownSeenMs = now;
+
+        if (w != prevTickW || h != prevTickH)
+        {
+            if (now - lastMouseDownSeenMs < 400.0)   // ① 变化发生在左键按下期间 / 刚松开
+                userResizeArmed = true;
+
+            prevTickW = w;
+            prevTickH = h;
+        }
+        else if (userResizeArmed                        // 用户在拖，且尺寸已稳定
+                 && editorSizeDiffersEnough()           // ③ ≥2px
+                 && now - editorCreatedMs > kSizeGraceMs      // ④ 不在开场窗口内
+                 && now - lastEditorSizeWriteMs > kSizeThrottleMs)
+        {
+            writeEditorSize();
+            userResizeArmed = false;    // 写过了：之后宿主的程序化改动不会被误记
+        }
+    }
 
 #if TOREI_EQ_DEBUG_LOG
     // --- 心跳（诊断，只在 TOREI_EQ_DEBUG_LOG=1 的构建里存在）------------------------

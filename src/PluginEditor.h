@@ -36,6 +36,15 @@ public:
 private:
     void timerCallback() override;
     void ensureWebView();
+    // 窗口尺寸持久化：把当前尺寸写回 editor_size.txt（构造时读回、用户拖动后写回）
+    void writeEditorSize();
+    bool editorSizeDiffersEnough() const;               // 与上次写入相差 ≥2px（排除拖动中 ±1~3px 抖动）
+    int    lastSavedEditorW = 0, lastSavedEditorH = 0;  // 上次写入（或构造时应用）的尺寸
+    int    prevTickW = 0, prevTickH = 0;                // 上一 tick 的尺寸（稳定性 + "变化"判据）
+    bool   userResizeArmed = false;                     // 检测到"用户拖动引起的尺寸变化"，等它稳定后写
+    double editorCreatedMs = 0.0;                       // 构造时刻（避开宿主在打开瞬间摆窗口）
+    double lastMouseDownSeenMs = -1.0e9;                // 最近一次观察到左键按下的时刻
+    double lastEditorSizeWriteMs = -1.0e9;
     void handleParameterChange (const juce::var& object);
     void handleCommand (const juce::var& object);
 
