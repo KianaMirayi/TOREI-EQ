@@ -26,6 +26,10 @@ var f2x=function(f){var mL=Math.log(20)/Math.LN10,ML=Math.log(20000)/Math.LN10;r
 var g2y=function(g){return 0.5-g/60};
 var x2f=function(x){return 20*Math.pow(10,x*3)};
 var y2g=function(y){return(0.5-y)*60};
+// 统一字体栈：与界面 DOM 同一套（Inter -> Segoe UI Variable Text -> Segoe UI）。
+// 不要用 "monospace"：Windows/Chromium 会解析成 Courier New（笔画细、打字机味，加 bold 也无救）；
+// 也不要只写 "JetBrains Mono"：本机未安装时会掉到浏览器默认衬线。
+var CFONT='"Inter","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif';
 var SP=new Float32Array(4096);for(var _spi=0;_spi<4096;_spi++)SP[_spi]=-120;var SP_LEN=4096;var IPS=new Float32Array(4096);for(var _ipi=0;_ipi<4096;_ipi++)IPS[_ipi]=-120;var IPS_LEN=0;var LOGSP=new Float32Array(4096);var CURVE=new Float32Array(2000);var CURVE2=new Float32Array(2000);var CURVE_DIRTY=true;window.__EQCMDS=window.__EQCMDS||[];
 var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246","168,85,247","236,72,153"];
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
@@ -225,13 +229,13 @@ function LevelMeter(p){var H=p.H||300;var cnv=useRef();
   var db2n=function(d){if(d<=-90)return 0;if(d>=0)return 1;if(d>=-18)return.5+((d+18)/18)*.5;if(d>=-36)return.25+((d+36)/18)*.25;return((d+90)/54)*.25};
   var db2y=function(d){return mt+mh*(1-db2n(d))};
   var TICKS=[0,-3,-6,-10,-15,-18,-24,-30,-36,-48,-60,-72,-90];
-  for(var ti=0;ti<TICKS.length;ti++){var d=TICKS[ti],y=db2y(d);ctx.font='6.5px "JetBrains Mono"';ctx.fillStyle=d===-3?"rgba(255,255,255,.7)":d===-18?"rgba(255,255,255,.5)":"rgba(255,255,255,.35)";ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillText(d===0?"0":d.toString(),mx-5,y)}
+  for(var ti=0;ti<TICKS.length;ti++){var d=TICKS[ti],y=db2y(d);ctx.font='600 6.5px '+CFONT;ctx.fillStyle=d===-3?"rgba(255,255,255,.7)":d===-18?"rgba(255,255,255,.5)":"rgba(255,255,255,.35)";ctx.textAlign="right";ctx.textBaseline="middle";ctx.fillText(d===0?"0":d.toString(),mx-5,y)}
   ctx.fillStyle="rgba(0,0,0,.3)";ctx.fillRect(mx-2,mt,mw+4,mh);ctx.strokeStyle="rgba(255,255,255,.08)";ctx.strokeRect(mx-2,mt,mw+4,mh);
   if(!cG||cGH!==H){cGH=H;cG=ctx.createLinearGradient(0,mt+mh,0,mt);cG.addColorStop(0,"#22c55e");cG.addColorStop(db2n(-18),"#22c55e");cG.addColorStop(db2n(-9),"#eab308");cG.addColorStop(db2n(-3),"#ef4444");cG.addColorStop(1,"#ef4444")}
   var m2=peakRef,py=db2y(m2.peak),ph=mh-py,ry=db2y(m2.rms),rh=mh-ry,hy=db2y(m2.hold);
   if(ph>0){ctx.fillStyle=cG;ctx.fillRect(mx,py,mw,ph)}if(rh>0){ctx.fillStyle=cG;ctx.fillRect(mx+1,ry,Math.max(1,mw-2),rh)}
   ctx.fillStyle=m2.hold>=-.1?"#ef4444":"#fff";ctx.fillRect(mx,hy-1,mw,2);
-  ctx.textAlign="center";ctx.textBaseline="top";ctx.font='7px "JetBrains Mono"';ctx.fillStyle=m2.hold>=-.1?"#ef4444":"rgba(255,255,255,.7)";ctx.fillText(Math.max(-90,m2.hold).toFixed(1),mx+mw/2,2)};
+  ctx.textAlign="center";ctx.textBaseline="top";ctx.font='600 7px '+CFONT;ctx.fillStyle=m2.hold>=-.1?"#ef4444":"rgba(255,255,255,.7)";ctx.fillText(Math.max(-90,m2.hold).toFixed(1),mx+mw/2,2)};
   rid=requestAnimationFrame(draw);return function(){cancelAnimationFrame(rid)}},[H]);
   return m("canvas",{ref:cnv,style:{width:76,height:H,display:"block"}})
 }
@@ -393,7 +397,7 @@ function BandPanel(p){var b=p.band,store=p.store,dims=p.dims,offset=p.offset,set
       ),
       m("div",{style:{display:"flex",flexDirection:"column",justifyContent:"flex-start",alignItems:"flex-end",width:104,gap:8,padding:"2px 0"}},
         m("div",{style:{display:"flex",alignItems:"center",gap:5}},
-          m("div",{style:{display:"flex",alignItems:"center",gap:2,background:"#1e2027",border:"1px solid #2a2d36",borderRadius:999,padding:"2px 6px",fontSize:11,fontFamily:"monospace",color:"#cbd5e1"}},
+          m("div",{style:{display:"flex",alignItems:"center",gap:2,background:"#1e2027",border:"1px solid #2a2d36",borderRadius:999,padding:"2px 6px",fontSize:11,fontFamily:CFONT,fontVariantNumeric:"tabular-nums",color:"#cbd5e1"}},
             m("span",{style:{cursor:"pointer",padding:"0 2px",display:"flex"},onClick:step(-1)},m(ChevronIcon,{size:11,dir:"left"})),
             m("span",{style:{minWidth:12,textAlign:"center",fontWeight:700}},idx+1),
             m("span",{style:{cursor:"pointer",padding:"0 2px",display:"flex"},onClick:step(1)},m(ChevronIcon,{size:11,dir:"right"}))
@@ -466,20 +470,19 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     var hasCpp=ok&&bindSpectrumFromCpp();
     bindLevelFromCpp();bindCurveFromCpp();
     if(!hasCpp){var rid;var t=function(){rid=requestAnimationFrame(t);genSpectrum();updatePeak()};rid=requestAnimationFrame(t);return function(){cancelAnimationFrame(rid)}}var rid2;var u=function(){rid2=requestAnimationFrame(u);if(!hasCpp)updatePeak()};rid2=requestAnimationFrame(u);return function(){cancelAnimationFrame(rid2)}});},[]);
-  // 渲染超采样倍数（3/2/1）。它决定画布后备存储的像素量 —— 也就是每个实例每帧要
-  // 合成/搬运的字节数（SS=3 时 8.3M 像素 ≈ 33 MB/帧/实例）。实例多、界面开始卡顿时把它
-  // 降到 2 或 1 能成比例减轻；Ctrl+Alt+S 或右键菜单里的"Render quality"可实时切换，会记忆。
-  var _ss=useState(function(){try{var v=parseFloat(localStorage.getItem("torei_ss"));return(v===1||v===2||v===3)?v:3}catch(e){return 3}});
-  var ssVal=_ss[0],setSsVal=_ss[1];
+  // 渲染超采样倍数：固定 3（当前设置；界面上不提供切换）。它决定画布后备存储的像素量 ——
+  // 也是每个实例每帧要合成/搬运的字节数（3x = 8.3M 像素 ≈ 33 MB/帧/实例；1x 只有 1/9）。
+  // 三层描边宽度（4.6/2.6/1.2）是按 3x 的亚像素余量定的；若改成 1x 必须同时换回
+  // 6.0/3.4/1.6，否则细线会出现逐列覆盖率波动（锯齿）。
   // draw 里必须读到"最新"的 store / listen，但本 effect 不能把它们放进依赖数组：
   // 依赖 store 会让**每一次拖拽（40~60 Hz 的状态变更）都重新执行整个 effect** ——
   // 而 effect 开头就重设 canvas.width，那会清空并重新分配整块后备存储、并重建 RAF 循环。
   // 实测：一次点击 = 6 次画布重新分配；拖动时每秒数百次。5 个实例叠加就是肉眼可见的卡顿。
-  // 所以：依赖里只留 [dims, ssVal]，状态一律经 ref 取最新值。
+  // 所以：依赖里只留 [dims]，状态一律经 ref 取最新值。
   var storeRefLive=useRef(store);storeRefLive.current=store;
   var drawListenRef=useRef(null);drawListenRef.current=listenId;
   useEffect(function(){if(dims.w<80)return;
-  var SS=ssVal,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
+  var SS=3,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
   // Round joins/caps keep polyline vertices smooth; supersampling (SS) gives the
   // anti-aliaser sub-pixel headroom so a sloping stroke does not show a periodic ripple.
   // NOTE: the "staircase" the curve used to show was NOT a rendering problem -- it came
@@ -495,31 +498,80 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // —— 所以绝大部分帧是白画的。
   // 另据 Hermes §16.4 的实测：渲染进程 CPU 对画布尺寸不敏感 ⇒ 成本主要在"每帧的绘制工作"
   // 那一项，砍帧率正好直接命中它（像素量那项由 SS 开关单独控制，两者互不干扰）。
-  //   正在交互（指针/滚轮/按键，500ms 内）→ 不限帧：拖节点的手感优先
-  //   有焦点（= 用户正在操作的那一个实例）→ 30 fps：频谱看起来与 60 无异
-  //   无焦点（= 场上其它实例）            → 12 fps：没人看，但保留基本更新
-  var INTERACT_MS=500,FPS_FOCUSED=30,FPS_IDLE=12;
-  var lastInteractT=-1e9,lastDrawT=0,prevSig=null,prevStore=null,prevListen=null;
-  var markInteract=function(){lastInteractT=performance.now()};
+  //   正在交互（指针/滚轮/按键/悬停，500ms 内）→ 不限帧：拖节点的手感优先
+  //   有"注意力证据"（有焦点，或 15s 内有过输入/悬停）→ 30 fps
+  //   多实例且完全没人管（≥15s 无输入、无悬停、无焦点）→ 15~20 fps（见下）
+  //
+  // ⚠️ 两条都是踩过的坑，别再改回去：
+  //  1) 曾经是"无焦点 → 12 fps"，那是**设计缺陷**：单实例时用户常常盯着一个没有焦点的窗口看
+  //     （鼠标在 DAW 那边点播放），12 fps 会被当成"卡顿"；焦点在"有/无"之间来回变化时就会
+  //     表现为"流畅一段、卡一段"地循环。
+  //  2) 所以**降帧只作为多实例的补救手段**：单实例（或只有 2 个）时**绝不降帧**；实例越多，
+  //     背景档越低（3 个→20，4 个及以上→15），最低不低于 15 fps。这样"总量"约等于
+  //     30 + 15×N 而不是 60×N，而正在操作/观看的那个窗口永远是 30 fps（交互时还不限帧）。
+  //   实例数靠 localStorage 心跳互相发现（与剪贴板同一块存储，见上）。
+  var INTERACT_MS=500,FPS_ACTIVE=30,BACKGROUND_AFTER_MS=15000,FPS_BG_MIN=15;
+  var instKey="torei_eq_inst_ping",instId=Math.random().toString(36).slice(2);
+  var pingInstances=function(){
+    try{
+      var now=Date.now(),o={};
+      try{o=JSON.parse(localStorage.getItem(instKey)||"{}")||{}}catch(e){o={}}
+      var out={},n=0;
+      for(var k in o){if(k&&typeof o[k]==="number"&&now-o[k]<8000){out[k]=o[k];n++}}
+      out[instId]=now;
+      localStorage.setItem(instKey,JSON.stringify(out));
+      return Math.max(1,Object.keys(out).length);
+    }catch(e){return 1}
+  };
+  var fpsBackgroundFor=function(n){return n<=2?FPS_ACTIVE:(n===3?20:FPS_BG_MIN)};
+  var _instCount=1,_instPingT=performance.now();
+  var lastAttentionT=-1e9,lastDrawT=0,prevSig=null,prevStore=null,prevListen=null;
+  // 焦点状态由**事件**维护，不再每帧轮询 document.hasFocus()：轮询值若抖动，帧率会跟着抖。
+  // 每秒只校正一次，且要求连续两次一致才改（迟滞），彻底消除"帧率跟着焦点抖"的可能。
+  var focusedFlag=true,lastFocusPollT=0,lastFocusPollVal=-1;
+  var markAttention=function(){lastAttentionT=performance.now()};
   var hasFocusFn=(typeof document.hasFocus==="function")?function(){try{return !!document.hasFocus()}catch(e){return true}}:function(){return true};
-  // 把"焦点判定"写进 C++ 日志（UI_Log 只诊断构建才落盘）：WebView2 里 document.hasFocus()
-  // 到底准不准，可以直接从 eq_debug.txt 看出来，不用猜。
-  var logActive=function(){var f=hasFocusFn();
-    try{if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.emitEvent("UI_Log",{msg:"draw focus="+(f?1:0)+" -> "+(f?FPS_FOCUSED:FPS_IDLE)+"fps"})}catch(e){}};
-  var onWinFocus=function(){markInteract();logActive()};
-  var onWinBlur=function(){logActive()};
-  window.addEventListener("pointerdown",markInteract,true);
-  window.addEventListener("pointermove",markInteract,true);
-  window.addEventListener("wheel",markInteract,true);
-  window.addEventListener("keydown",markInteract,true);
+  // 诊断上报（UI_Log 走 C++ 的 logEq，产品构建也会落盘，便于事后从 eq_debug.txt 复现）
+  var logDraw=function(msg){try{if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.emitEvent("UI_Log",{msg:msg})}catch(e){}};
+  var logActive=function(){logDraw("draw focus="+(focusedFlag?1:0))};
+  var onWinFocus=function(){markAttention();focusedFlag=true;logActive()};
+  var onWinBlur=function(){focusedFlag=false;logActive()};
+  window.addEventListener("pointerdown",markAttention,true);
+  window.addEventListener("pointermove",markAttention,true);
+  window.addEventListener("pointerover",markAttention,true);
+  window.addEventListener("wheel",markAttention,true);
+  window.addEventListener("keydown",markAttention,true);
   window.addEventListener("focus",onWinFocus);
   window.addEventListener("blur",onWinBlur);
   logActive();
+  // 诊断：窗口下方空白带排查 —— 页面视口 vs WebView2 宿主窗口（只在首次挂载时挂一次监听）
+  var logGeom=function(){try{
+    var el=cnv.current,c=el?el.getBoundingClientRect():{width:-1,height:-1};
+    logDraw("geom vp="+innerWidth+"x"+innerHeight+" outer="+outerWidth+"x"+outerHeight+
+      " dpr="+devicePixelRatio+" scr="+screen.width+"x"+screen.height+" availH="+screen.availHeight+
+      " body="+document.body.clientHeight+" html="+document.documentElement.clientHeight+
+      " cnvCSS="+Math.round(c.width)+"x"+Math.round(c.height)+
+      " cnvPx="+(el?el.width+"x"+el.height:"-"))}catch(e){logDraw("geom-err:"+e.message)}};
+  logGeom(); setTimeout(logGeom,1500); setTimeout(logGeom,4000);
+  var _drawN=0,_rafN=0,_fpsWinT=performance.now(),_lastFpsKey="";
   var rid,draw=function(){
   rid=requestAnimationFrame(draw);
   var _tNow=performance.now();
-  // 1) 帧率上限（交互中为 0 = 不限帧）
-  var _minInterval=((_tNow-lastInteractT)<INTERACT_MS)?0:(hasFocusFn()?1000/FPS_FOCUSED:1000/FPS_IDLE);
+  _rafN++;
+  // 每秒一次焦点校正（带"连续两次一致"的迟滞）
+  if(_tNow-lastFocusPollT>1000){
+    lastFocusPollT=_tNow;
+    var _fp=hasFocusFn()?1:0;
+    if(_fp===lastFocusPollVal&&_fp!==(focusedFlag?1:0)){focusedFlag=!!_fp;logActive()}
+    lastFocusPollVal=_fp;
+  }
+  // 1) 帧率上限（交互中为 0 = 不限帧）。实例数每 2 秒刷新一次（localStorage 心跳），
+  //    不放在每帧里 —— 那会变成每帧一次 JSON.parse + 存储读。
+  if(_tNow-_instPingT>2000){_instPingT=_tNow;try{_instCount=pingInstances()}catch(e){}}
+  var _interacting=(_tNow-lastAttentionT)<INTERACT_MS;
+  var _bg=fpsBackgroundFor(_instCount);
+  var _attended=focusedFlag||(_tNow-lastAttentionT)<BACKGROUND_AFTER_MS;
+  var _minInterval=_interacting?0:(1000/(_attended?FPS_ACTIVE:_bg));
   if(_tNow-lastDrawT<_minInterval)return;
   // 取最新状态：本 effect 的依赖里已没有 store/listenId（见上），直接用闭包里的会读到旧值。
   var store=storeRefLive.current,listenId=drawListenRef.current,W=dims.w,H=dims.h,b=store.B,i;
@@ -538,23 +590,39 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var _settling=(_tNow-_lastChangeT)<600;
   if(_sig===prevSig&&store===prevStore&&listenId===prevListen&&!_settling)return;
   prevSig=_sig;prevStore=store;prevListen=listenId;lastDrawT=_tNow;
+  // 诊断：每 2 秒上报一次实际帧率（只在数值变化时写，避免刷屏）。raf= 是浏览器给的
+  // rAF 回调率 —— 若它明显低于 60，说明限流来自浏览器/合成器（例如遮挡判定），不是我们。
+  _drawN++;
+  if(_tNow-_fpsWinT>=2000){
+    var _fps=Math.round(_drawN*1000/(_tNow-_fpsWinT)),_raf=Math.round(_rafN*1000/(_tNow-_fpsWinT));
+    _drawN=0;_rafN=0;_fpsWinT=_tNow;
+    var _key=_fps+"/"+_raf;
+    if(_key!==_lastFpsKey){_lastFpsKey=_key;
+      logDraw("draw fps="+_fps+" raf="+_raf+" focus="+(focusedFlag?1:0)+" idleMs="+Math.round(_tNow-lastAttentionT)+" inst="+_instCount+" cap="+(_interacting?"none":(_attended?FPS_ACTIVE:_bg))+" ss="+SS)}
+  }
   ctx.clearRect(0,0,W,H);
 
   for(i=0;i<FT.length;i++){var x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.strokeStyle="rgba(255,255,255,.04)";ctx.stroke()}
-  for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?"bold 10px monospace":"9px monospace";ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]]){var lx=Math.min(x,W-40);if(x>W-40)ctx.textAlign="right";ctx.fillText(FL[FT[i]],lx,H-6)}}
+  for(i=0;i<FT.length;i++){var mj=FT[i]===20||FT[i]===200||FT[i]===2000||FT[i]===20000,mn=FT[i]===50||FT[i]===500||FT[i]===5000;ctx.strokeStyle=mj?"rgba(255,255,255,.12)":mn?"rgba(255,255,255,.08)":"rgba(255,255,255,.04)";ctx.lineWidth=mj||mn?2:1;x=f2x(FT[i])*W;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.fillStyle=mj?"rgba(255,255,255,.6)":mn?"rgba(255,255,255,.4)":"rgba(255,255,255,.25)";ctx.font=mj?("700 10px "+CFONT):("500 9px "+CFONT);ctx.textAlign="center";ctx.textBaseline="bottom";if(FL[FT[i]]){var lx=Math.min(x,W-40);if(x>W-40)ctx.textAlign="right";ctx.fillText(FL[FT[i]],lx,H-6)}}
   // 左侧 EQ 增益刻度（±30，与右侧频谱 dBFS 空间对齐，Pro-Q 双刻度）
   // g2y: 0 增益在中、+30 顶、-30 底；0 增益线橙色高亮为主要参考线
   var GT=GTC;
   for(i=0;i<GT.length;i++){var g=GT[i],gy=g2y(g)*H,ly=Math.max(6,Math.min(H-6,gy));
     ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(6,gy);ctx.strokeStyle=g===0?"rgba(234,179,8,.7)":"rgba(255,255,255,.16)";ctx.lineWidth=g===0?1.5:1;ctx.stroke();
-    ctx.fillStyle=g===0?"rgba(234,179,8,.85)":"rgba(255,255,255,.42)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(g===0?"0":(g>0?"+"+g:String(g)),8,ly)}
+    var gtxt=g===0?"0":(g>0?"+"+g:String(g));
+    // 增益读数要能在频谱亮区之上读清：加粗 + 提亮 + 一圈暗描边。
+    // 用 strokeText 描边而不是 shadowBlur —— 后者是高斯模糊，本项目约定帧内不用。
+    ctx.font="700 12px "+CFONT;ctx.textAlign="left";ctx.textBaseline="middle";
+    ctx.lineWidth=3;ctx.strokeStyle="rgba(0,0,0,.62)";ctx.strokeText(gtxt,8,ly);
+    ctx.fillStyle=g===0?"rgba(250,204,21,.95)":"rgba(255,255,255,.88)";ctx.fillText(gtxt,8,ly);
+    ctx.lineWidth=1}
   // 频谱纵轴 = 0dBFS 顶 / -96dBFS 底（线性），宽量程让音乐的 -25~-65dB 频谱落在中上部，而非贴底
   var sp2y=function(d){return Math.max(-96,Math.min(0,d))/(-96)};
   var SPT=SPTC;
   for(i=0;i<SPT.length;i++){var sd=SPT[i],sy=sp2y(sd)*H;
     if(sd===0){ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1}
     else{ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(255,229,185,.07)";ctx.stroke()}
-    ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="8px monospace";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(String(sd),W-28,sd===0?sy+8:sy)}
+    ctx.fillStyle=sd===0?"rgba(234,179,8,.7)":"rgba(255,229,185,.35)";ctx.font="600 9px "+CFONT;ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(String(sd),W-28,sd===0?sy+8:sy)}
   // 频谱：DSP 已输出 SP_LEN(=256) 个对数频率、已平滑的点，UI 直接绘制（二次贝塞尔柔化），不再采样/平滑
   var SPW=W-34;
   var sx=function(i){return ((i+0.5)/Math.max(1,SP_LEN))*W};
@@ -643,7 +711,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     if(isSel){var hrg=ctx.createRadialGradient(nx,ny,2,nx,ny,26);hrg.addColorStop(0,"rgba("+BC[i%8]+",.55)");hrg.addColorStop(1,"rgba("+BC[i%8]+",0)");ctx.fillStyle=hrg;ctx.beginPath();ctx.arc(nx,ny,26,0,Math.PI*2);ctx.fill()}
     ctx.globalAlpha=nodeAlpha;ctx.beginPath();ctx.arc(nx,ny,isSel?9:(isMulti?8:7),0,Math.PI*2);ctx.fillStyle="rgb("+BC[i%8]+")";ctx.shadowColor="rgba("+BC[i%8]+",.9)";ctx.shadowBlur=isSel?15:0;ctx.fill();ctx.shadowBlur=0;ctx.strokeStyle=isSel?"#fff":"rgba(255,255,255,.85)";ctx.lineWidth=2;ctx.stroke();ctx.globalAlpha=1;
     if(bn.mode!=="stereo"){var _mt=bn.mode==="mid"?{t:"M",c:"#22c55e",o:-13}:(bn.mode==="side"?{t:"S",c:"#38bdf8",o:13}:(bn.mode==="L"?{t:"L",c:"#f97316",o:-13}:{t:"R",c:"#a855f7",o:13})),lbl=_mt.t,lc=_mt.c,lx=nx+_mt.o,ly=ny;
-      ctx.font="bold 9px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+      ctx.font="700 9px "+CFONT;ctx.textAlign="center";ctx.textBaseline="middle";
       ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(lx-7,ly-6,14,12);
       ctx.strokeStyle=lc;ctx.lineWidth=1;ctx.strokeRect(lx-7,ly-6,14,12);
       ctx.fillStyle=lc;ctx.fillText(lbl,lx,ly)}
@@ -655,12 +723,13 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     ctx.strokeStyle="rgba("+BC[li%8]+",.95)";ctx.lineWidth=1.5;ctx.shadowColor="rgba("+BC[li%8]+",.8)";ctx.shadowBlur=8;ctx.beginPath();ctx.moveTo(lx1,0);ctx.lineTo(lx1,H);ctx.moveTo(lx2,0);ctx.lineTo(lx2,H);ctx.stroke();ctx.shadowBlur=0}}
   };rid=requestAnimationFrame(draw);
   return function(){cancelAnimationFrame(rid);
-    window.removeEventListener("pointerdown",markInteract,true);
-    window.removeEventListener("pointermove",markInteract,true);
-    window.removeEventListener("wheel",markInteract,true);
-    window.removeEventListener("keydown",markInteract,true);
+    window.removeEventListener("pointerdown",markAttention,true);
+    window.removeEventListener("pointermove",markAttention,true);
+    window.removeEventListener("pointerover",markAttention,true);
+    window.removeEventListener("wheel",markAttention,true);
+    window.removeEventListener("keydown",markAttention,true);
     window.removeEventListener("focus",onWinFocus);
-    window.removeEventListener("blur",onWinBlur)}},[dims,ssVal]);
+    window.removeEventListener("blur",onWinBlur)}},[dims]);
   var hitTest=function(mx,my){for(var i=store.B.length-1;i>=0;i--){var b=store.B[i];if(!b.active||b.mute)continue;if(Math.hypot(mx-f2x(b.freq)*dims.w,my-g2y(b.gain)*dims.h)<14)return b}return null};
   var drag=useRef(null);
   // store 的最新引用。下面几个 window 级 effect 只订阅一次（deps=[]），靠 storeRef 取当前渲染
@@ -682,13 +751,9 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     return function(){window.removeEventListener("pointerdown",h,true);window.removeEventListener("contextmenu",h,true);window.removeEventListener("keydown",k)}
   },[ctxMenu]);
   // Ctrl/Cmd + A / C / V = 全选 / 复制 / 粘贴（在输入框里打字时不拦截）
-  // Ctrl + Alt + S = 循环切换渲染质量 3x -> 2x -> 1x（画布像素量成平方下降：9x -> 4x -> 1x），
-  // 实例多、界面卡顿时用它换流畅度；选择会记忆在 localStorage（同一用户数据目录下所有实例共享）。
   useEffect(function(){
     var kd=function(e){if(!(e.ctrlKey||e.metaKey))return;var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;
       var k=(e.key||"").toLowerCase();
-      if(k==="s"&&e.altKey){e.preventDefault();
-        setSsVal(function(v){var n=v===3?2:(v===2?1:3);try{localStorage.setItem("torei_ss",String(n))}catch(e2){}return n});return}
       if(k==="a"){e.preventDefault();storeRef.current.selectAll()}
       else if(k==="c"){e.preventDefault();storeRef.current.copyBands()}
       else if(k==="v"){e.preventDefault();storeRef.current.pasteBands()}};
@@ -717,19 +782,17 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var onDC=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t)store.update(t.id,{gain:0});else store.add(Math.round(x2f(mx/dims.w)),+y2g(my/dims.h).toFixed(1))};
   var showTipId=tip!==null?tip:(activeId!==null?activeId:store.sel),tipB=null,tipIdx=0,i2;
   if(showTipId!==null)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
-  return m("div",{className:"flex-1",style:{display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
+  return m("div",{style:{flex:"1 1 0%",display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
     m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onContextMenu:onCM,onWheel:onWheel},
       m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
       tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:function(id){listenByPtrRef.current=(id!==null);applyListen(id)},fade:tipFade}):null,
       store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null,
-      ctxMenu?m("div",{className:"eqctx tdropanim",onPointerDown:stopE,style:{position:"absolute",left:Math.max(4,Math.min(ctxMenu.x,dims.w-200)),top:Math.max(4,Math.min(ctxMenu.y,dims.h-196)),zIndex:40,width:196,background:"#252830",border:"1px solid rgba(148,163,184,.28)",borderRadius:10,boxShadow:"0 18px 36px rgba(0,0,0,.65)",padding:5,fontSize:12,color:"#e2e8f0"}},
+      ctxMenu?m("div",{className:"eqctx tdropanim",onPointerDown:stopE,style:{position:"absolute",left:Math.max(4,Math.min(ctxMenu.x,dims.w-200)),top:Math.max(4,Math.min(ctxMenu.y,dims.h-152)),zIndex:40,width:196,background:"#252830",border:"1px solid rgba(148,163,184,.28)",borderRadius:10,boxShadow:"0 18px 36px rgba(0,0,0,.65)",padding:5,fontSize:12,color:"#e2e8f0"}},
         mi("all","Select All",store.B.length?store.B.length+" bands":null,store.B.length>0&&store.selIds.length<store.B.length,function(){store.selectAll()}),
         mi("inv","Invert Gain",selN?selN+" selected":null,selN>0,function(){store.invertGain()}),
         m("div",{key:"sep",style:{height:1,background:"rgba(148,163,184,.18)",margin:"4px 6px"}}),
         mi("copy","Copy","Ctrl+C",selN>0,function(){store.copyBands()}),
         mi("paste","Paste","Ctrl+V",true,function(){store.pasteBands()}),
-        m("div",{key:"sep2",style:{height:1,background:"rgba(148,163,184,.18)",margin:"4px 6px"}}),
-        mi("ss","Render quality",ssVal+"x",true,function(){setSsVal(function(v){var n=v===3?2:(v===2?1:3);try{localStorage.setItem("torei_ss",String(n))}catch(e2){}return n})})
       ):null,
       store.toast?m("div",{style:{position:"absolute",left:"50%",transform:"translateX(-50%)",bottom:16,zIndex:50,padding:"7px 14px",borderRadius:8,background:"rgba(15,17,22,.94)",border:"1px solid rgba(148,163,184,.3)",color:"#e2e8f0",fontSize:12,pointerEvents:"none",boxShadow:"0 10px 24px rgba(0,0,0,.6)"}},store.toast):null
     ),
