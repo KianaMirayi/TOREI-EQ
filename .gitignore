@@ -89,3 +89,14 @@ Desktop.ini
 
 # Test
 E:/AI Tools/ForHermesTest/
+
+# 分发产物与安装器工程（本地-only，不入库；发布走 GitHub Release 附件）
+#   dist\                      —— 打包产物：安装器 exe、便携 zip、校验值、发布说明
+#   installer\                 —— Inno Setup 安装器工程（.iss / 安装前说明 / 构建脚本）
+#                                 + deps\（WebView2 引导程序、中文语言文件，由 fetch-deps.ps1 下载）
+#                                 + payload\（编译安装器时的载荷暂存）
+# 重新生成：先编译 Release，再跑
+#   powershell -File dist\make_package.ps1        （便携 zip）
+#   powershell -File installer\build-installer.ps1（安装器 exe）
+dist/
+installer/
