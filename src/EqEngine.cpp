@@ -5,8 +5,7 @@ void EqEngine::prepare (double sr, int samplesPerBlock)
     juce::ignoreUnused (samplesPerBlock);
     sampleRate = sr;
 
-    // The curve is a function of the coefficient magnitudes AT THIS RATE, so a
-    // sample-rate change is a curve change (see EqEngine.h getCurveRevision()).
+    // The curve depends on the coefficients AT THIS RATE, so a rate change is a curve change.
     bumpCurveRevision();
 
     // Reset filter processing state, but PRESERVE the band definitions.
@@ -400,14 +399,8 @@ void EqEngine::setParam (int index, const juce::String& param, const juce::var& 
     if (index < 0 || index >= kMaxBands || ! bands[index].occupied.load())
         return;
 
-    // One unconditional bump for EVERY per-band parameter, before the branches below.
-    // Deliberately coarse (and cheap: one relaxed fetch_add):
-    //   * `mode` and `bypass` do NOT rebuild coefficients, yet they DO change the curve
-    //     (the group a band appears in, and whether it appears at all), so hanging the
-    //     revision off updateCoefficients() alone would miss them;
-    //   * a branch added here later automatically bumps without anyone remembering to.
-    // A redundant bump only costs one extra curve push; a missing one would freeze the
-    // displayed curve. See EqEngine.h getCurveRevision().
+    // Bump once for EVERY per-band parameter before the branches: `mode`/`bypass` change the
+    // curve without rebuilding coefficients, and a branch added later bumps automatically.
     bumpCurveRevision();
 
     Band& b = bands[index];
@@ -722,12 +715,12 @@ void EqEngine::process (juce::AudioBuffer<float>& buffer)
 #endif
     }
 
-    // --- Solo audition stage (§0.10 / §22) ---
+    // --- Solo audition stage ---
     // Appends a bandpass of the DRY signal (the chain above is fully transparent while
     // listening), so you hear the frequency content around the listened band with none
     // of the EQ gain.
     //
-    // The audition is built from the LANES the listened band acts on (§22). That is what
+    // 
     // makes L solo only the left ear, R only the right, and mid/side mono (both output
     // channels identical) -- matching Pro-Q, where soloing a band plays the spectrum
     // that band affects, and only that.

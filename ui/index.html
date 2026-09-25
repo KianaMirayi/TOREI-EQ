@@ -35,8 +35,7 @@ var BC=["239,68,68","249,115,22","234,179,8","34,197,94","6,182,212","59,130,246
 var FT=[20,30,50,80,100,200,300,500,800,1000,2000,3000,5000,8000,10000,20000];
 var FL={20:"20",30:"30",50:"50",80:"80",100:"100",200:"200",300:"300",500:"500",800:"800",1000:"1k",2000:"2k",3000:"3k",5000:"5k",8000:"8k",10000:"10k",20000:"20k"};
 var GT=[24,18,12,6,0,-6,-12,-18,-24];
-// 画布用的刻度表（DSH：原来是写在 draw 循环里的数组字面量 —— 每帧每个实例都分配一次，
-// 违反本项目"RAF 循环里零分配"的约定）。提到模块作用域，值一字未改。
+// 画布刻度表（从 draw 循环里的数组字面量提出来：RAF 循环里应零分配）。
 var GTC=[30,18,12,6,0,-6,-12,-18,-24,-30];
 var SPTC=[0,-3,-6,-10,-15,-18,-24,-30,-36,-48,-60,-72,-84,-96];
 var FILTER_TYPES=["peaking","lowshelf","highshelf","lowpass","highpass"];
@@ -438,7 +437,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var listenRef=useRef(null);
   // 监听是"按住式"的，但有两个来源：鼠标按住耳机按钮、或按住 S 键。
   // window 级的 pointerup 兜底只应结束"指针来源"的监听 —— 否则按住 S 键期间鼠标
-  // 随便一松就会把监听清掉（见 LISTEN_FEATURE_HANDOFF.md §0.13）。
+  // 
   var listenByPtrRef=useRef(false);
   var applyListen=function(id){if(listenRef.current===id)return;if(listenRef.current!==null)sendParam(listenRef.current,"listen",false);if(id!==null){sendParam(id,"listen",true);var _lb=null;for(var _li=0;_li<store.B.length;_li++)if(store.B[_li].id===id){_lb=store.B[_li];break}sendParam(-1,"soloLevel",_lb?(_lb.soloDb||0):0)}listenRef.current=id;setListenId(id)};
   useEffect(function(){store.setListening(listenId!==null)},[listenId]);
@@ -483,34 +482,11 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var drawListenRef=useRef(null);drawListenRef.current=listenId;
   useEffect(function(){if(dims.w<80)return;
   var SS=3,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
-  // Round joins/caps keep polyline vertices smooth; supersampling (SS) gives the
-  // anti-aliaser sub-pixel headroom so a sloping stroke does not show a periodic ripple.
-  // NOTE: the "staircase" the curve used to show was NOT a rendering problem -- it came
-  // from the C++ -> JS curve payload being quantised to 0.1 dB (= 1.37 screen px at
-  // g2y = 0.5 - g/60). That is fixed at the source (PluginEditor::pushCurve now uses
-  // 0.01 dB), so no blur/downstream softening is needed any more. See
-  // CURVE_STAIRSTEP_HANDOFF.md.
+  
   ctx.lineJoin="round";ctx.lineCap="round";
-  // ===== 帧率预算 + 变化检测（DSH 加，见 WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §18）=====
-  // 每个可见实例的成本 ≈ 每帧成本 × 帧率。这里以前**没有任何帧率上限**：RAF 跑到显示刷新率
-  // （60~144 Hz），而这个循环每帧都把整个画布重画一遍（网格 + 刻度 + 两条频谱 + 4 条曲线 +
-  // 节点；SS=3 时后备存储 8.3M 像素）。但数据源只有 ~38 Hz（C++ 频谱），静止时更是零
-  // —— 所以绝大部分帧是白画的。
-  // 另据 Hermes §16.4 的实测：渲染进程 CPU 对画布尺寸不敏感 ⇒ 成本主要在"每帧的绘制工作"
-  // 那一项，砍帧率正好直接命中它（像素量那项由 SS 开关单独控制，两者互不干扰）。
-  //   正在交互（指针/滚轮/按键/悬停，500ms 内）→ 不限帧：拖节点的手感优先
-  //   有"注意力证据"（有焦点，或 15s 内有过输入/悬停）→ 30 fps
-  //   多实例且完全没人管（≥15s 无输入、无悬停、无焦点）→ 15~20 fps（见下）
-  //
-  // ⚠️ 两条都是踩过的坑，别再改回去：
-  //  1) 曾经是"无焦点 → 12 fps"，那是**设计缺陷**：单实例时用户常常盯着一个没有焦点的窗口看
-  //     （鼠标在 DAW 那边点播放），12 fps 会被当成"卡顿"；焦点在"有/无"之间来回变化时就会
-  //     表现为"流畅一段、卡一段"地循环。
-  //  2) 所以**降帧只作为多实例的补救手段**：单实例（或只有 2 个）时**绝不降帧**；实例越多，
-  //     背景档越低（3 个→20，4 个及以上→15），最低不低于 15 fps。这样"总量"约等于
-  //     30 + 15×N 而不是 60×N，而正在操作/观看的那个窗口永远是 30 fps（交互时还不限帧）。
-  //   实例数靠 localStorage 心跳互相发现（与剪贴板同一块存储，见上）。
+  // 帧率预算：交互中不限帧，非交互 30fps，只有多实例时没人管的窗口才降到 15~20fps。
   var INTERACT_MS=500,FPS_ACTIVE=30,BACKGROUND_AFTER_MS=15000,FPS_BG_MIN=15;
+  // 实例数靠 localStorage 心跳发现（键名与剪贴板不同）；背景档 = 3 个→20fps、≥4 个→15fps。
   var instKey="torei_eq_inst_ping",instId=Math.random().toString(36).slice(2);
   var pingInstances=function(){
     try{
@@ -526,12 +502,11 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var fpsBackgroundFor=function(n){return n<=2?FPS_ACTIVE:(n===3?20:FPS_BG_MIN)};
   var _instCount=1,_instPingT=performance.now();
   var lastAttentionT=-1e9,lastDrawT=0,prevSig=null,prevStore=null,prevListen=null;
-  // 焦点状态由**事件**维护，不再每帧轮询 document.hasFocus()：轮询值若抖动，帧率会跟着抖。
-  // 每秒只校正一次，且要求连续两次一致才改（迟滞），彻底消除"帧率跟着焦点抖"的可能。
+  // 焦点由事件维护 + 每秒带迟滞校正一次（每帧轮询 hasFocus 会带着帧率抖）。
   var focusedFlag=true,lastFocusPollT=0,lastFocusPollVal=-1;
   var markAttention=function(){lastAttentionT=performance.now()};
   var hasFocusFn=(typeof document.hasFocus==="function")?function(){try{return !!document.hasFocus()}catch(e){return true}}:function(){return true};
-  // 诊断上报（UI_Log 走 C++ 的 logEq，产品构建也会落盘，便于事后从 eq_debug.txt 复现）
+  // 诊断上报：走 UI_Log，会落进 C++ 的日志文件。
   var logDraw=function(msg){try{if(typeof __JUCE__!=="undefined"&&__JUCE__.backend)__JUCE__.backend.emitEvent("UI_Log",{msg:msg})}catch(e){}};
   var logActive=function(){logDraw("draw focus="+(focusedFlag?1:0))};
   var onWinFocus=function(){markAttention();focusedFlag=true;logActive()};
@@ -565,8 +540,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     if(_fp===lastFocusPollVal&&_fp!==(focusedFlag?1:0)){focusedFlag=!!_fp;logActive()}
     lastFocusPollVal=_fp;
   }
-  // 1) 帧率上限（交互中为 0 = 不限帧）。实例数每 2 秒刷新一次（localStorage 心跳），
-  //    不放在每帧里 —— 那会变成每帧一次 JSON.parse + 存储读。
+  // 帧率上限；实例数每 2 秒用心跳刷新一次（不放每帧里）。
   if(_tNow-_instPingT>2000){_instPingT=_tNow;try{_instCount=pingInstances()}catch(e){}}
   var _interacting=(_tNow-lastAttentionT)<INTERACT_MS;
   var _bg=fpsBackgroundFor(_instCount);
@@ -575,9 +549,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   if(_tNow-lastDrawT<_minInterval)return;
   // 取最新状态：本 effect 的依赖里已没有 store/listenId（见上），直接用闭包里的会读到旧值。
   var store=storeRefLive.current,listenId=drawListenRef.current,W=dims.w,H=dims.h,b=store.B,i;
-  // 2) 变化检测：数据源四类 + 状态。用"抽样求和"而不是逐点比较，几十次浮点加法即可。
-  //    曲线必须抽 EQCURVE_* 源数组：CV_* 是在下面 applyEqCurve() 里才算出来的，抽它会永远
-  //    看不到新数据（宿主改了曲线而 UI 状态没变时，例如采样率变化，就会漏掉这次重画）。
+  // 变化检测：抽样求和比对数据 + store 引用（曲线要抽 EQCURVE_* 源数组，CV_* 是算出来的）。
   var _sig=0,_j;
   for(_j=0;_j<SP_LEN;_j+=16)_sig+=SP[_j]*1.7;
   for(_j=0;_j<IPS_LEN;_j+=16)_sig-=IPS[_j]*1.3;
@@ -585,13 +557,11 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   for(_j=0;_j<EQCURVE_LEN_S;_j+=8)_sig+=EQCURVE_S[_j]*.3;
   for(_j=0;_j<EQCURVE_LEN_L;_j+=8)_sig+=EQCURVE_L[_j]*.2;
   for(_j=0;_j<EQCURVE_LEN_R;_j+=8)_sig+=EQCURVE_R[_j]*.17;
-  // 数据刚停止变化的 600ms 内必须继续画：M/S 判决的滞回死区与"解冻"要靠这段时间跑完
-  // （否则拖动结束后那一次"颜色归位"永远不执行）。
+  // 数据停变后 600ms 内继续画：M/S 判决的滞回/解冻要靠这段时间跑完。
   var _settling=(_tNow-_lastChangeT)<600;
   if(_sig===prevSig&&store===prevStore&&listenId===prevListen&&!_settling)return;
   prevSig=_sig;prevStore=store;prevListen=listenId;lastDrawT=_tNow;
-  // 诊断：每 2 秒上报一次实际帧率（只在数值变化时写，避免刷屏）。raf= 是浏览器给的
-  // rAF 回调率 —— 若它明显低于 60，说明限流来自浏览器/合成器（例如遮挡判定），不是我们。
+  // 每 2 秒上报实际帧率与 rAF 回调率（raf 明显低于 60 说明是浏览器在限流）。
   _drawN++;
   if(_tNow-_fpsWinT>=2000){
     var _fps=Math.round(_drawN*1000/(_tNow-_fpsWinT)),_raf=Math.round(_rafN*1000/(_tNow-_fpsWinT));
@@ -813,19 +783,7 @@ function App(){
     var tag=e.target&&e.target.tagName;if(tag==="INPUT"||tag==="TEXTAREA")return;if(e.repeat)return;
     var ids=store.selIds.length?store.selIds:(store.sel!==null?[store.sel]:[]);if(ids.length)store.removeMany(ids)};
     window.addEventListener("keydown",h);return function(){window.removeEventListener("keydown",h)}},[store.sel,store.selIds]);
-  /** Wait for the DSP bridge, then declare the initial EQ bands. If the bridge
-      never becomes ready, flag the UI as offline (simulated data) so the user can
-      tell that the visible curve/spectrum are NOT coming from the DSP. */
-  /** Option A: declare the initial EQ bands by pushing them into the global command
-      queue (window.__EQCMDS). C++ polls that queue via evaluateJavascript, so this
-      does NOT depend on the fragile postMessage/emitEvent bridge. The UI_Ready
-      diagnostic is dropped (it relied on the broken emitEvent direction). */
-  // Mount sync. C++ owns the band state, so ASK for it rather than pushing our local
-  // defaults -- pushing defaults is exactly what wiped the user's EQ whenever the
-  // editor was rebuilt (switching to another plugin and back, closing/reopening the
-  // window). If Band_State does not arrive within 600 ms (a C++ side that does not
-  // implement Request_State yet), fall back to the old push-defaults behaviour so the
-  // UI can never end up blank.
+  
   var pushDefaultBands=function(){try{for(var i=0;i<store.B.length;i++){var b=store.B[i];sendCmd("AddBand",{index:b.id,freq:b.freq,gain:b.gain,type:b.type,q:b.q})}}catch(e){}};
   useEffect(function(){
     var done=false;

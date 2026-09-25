@@ -29,12 +29,7 @@ static juce::File findWebUI()
     return {};
 }
 
-// 诊断用：%APPDATA%\TOREI-EQ\push_mode.txt 里的整数（0/1/2）覆盖编译期的
-// TOREI_DIAG_PUSH_MODE，这样切换推送模式不需要重编译，也不需要重启 DAW
-// （编辑器每秒重读一次）。返回 -1 表示没有有效覆盖值。
-//
-// 只在诊断构建（TOREI_EQ_DEBUG_LOG=1）里编译：产品构建不该每秒去碰一次文件系统，
-// 而这个运行时实验通道本来就是定位问题用的（WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §13.5）。
+// 从 push_mode.txt 读推送模式覆盖值（-1 = 无有效值）；只编译在诊断构建里。
 #if TOREI_EQ_DEBUG_LOG
 static int readPushModeOverride()
 {
@@ -51,24 +46,16 @@ static int readPushModeOverride()
 }
 #endif
 
-// 曲线安全刷新间隔（单位：tick）。实测 tick 率约 21 Hz，所以 10 tick ≈ 0.5 s：
-// 万一将来有人给曲线加了新的输入却忘了 bump 版本号（见 EqEngine::getCurveRevision()），
-// 显示的曲线最多滞后这么久就会被强制纠正回来 —— 去重是"优化"，这条兜底保证它不会
-// 变成"陈旧显示"这类正确性问题。
+// 曲线安全刷新间隔（tick）：万一以后给曲线加了新输入却忘了 bump 版本号，最多滞后这么久。
 static constexpr int kCurveSafetyRefreshTicks = 10;
 
-// "慢 tick"告警阈值（毫秒）。设为 0 即关闭告警。
-// 修复前实测每 tick 18.6 ms/实例（两个实例就把宿主消息线程吃到饱和），修复后空闲
-// 7.2 ms，Release 下应远低于此。25 ms 是"明显不正常"的量级：它触发就意味着占用率
-// 问题回来了（或是宿主自己在忙别的）。只在超过阈值时写盘，健康运行时零开销。
+// 慢 tick 告警阈值（ms）。0 = 关闭。正常远低于此（Release 空闲约 2 ms/tick）。
 static constexpr double kSlowTickAlarmMs = 25.0;
 
-// 同一条告警的最小间隔，避免"每个 tick 都超阈值"时把日志写爆。
+// 同一条告警的最小间隔，避免每个 tick 都超阈值时把日志写爆。
 static constexpr juce::uint32 kSlowTickLogIntervalMs = 5000;
 
-// 每 tick 的最小计时器：产品构建只统计总耗时（喂上面的"慢 tick"告警），诊断构建额外
-// 记录分阶段时刻（喂 TICK 心跳行里的分解）。这样调用点不用写 #if：产品构建里
-// markXxx() 是空函数，只留下 5 次高精度计数器读取（约 60 ns）。
+// 每 tick 计时：产品构建只统计总耗时（喂告警），诊断构建额外记分阶段时刻（喂心跳行）。
 struct TickTimer
 {
     juce::int64 t0 = juce::Time::getHighResolutionTicks();
@@ -100,7 +87,7 @@ static juce::File editorSizeFile()
              .getChildFile ("editor_size.txt");
 }
 
-// 尺寸持久化的三个阈值（"只在用户真的拖了窗口时才写"靠它们 + 左键判据）
+
 static constexpr int    kSizeMinDeltaPx = 2;       // 小于 2px 的变化视为噪声（拖动时真有 ±1~3px 抖动）
 static constexpr double kSizeGraceMs    = 500.0;   // 打开后这段时间内一律不写（避开宿主创建编辑器时的 setSize）
 static constexpr double kSizeThrottleMs = 500.0;   // 两次写盘最小间隔
@@ -263,10 +250,7 @@ void ToreiEQAudioProcessorEditor::ensureWebView()
     webView->onPageLoaded = [this] (const juce::String& url)
     {
 #if TOREI_EQ_DEBUG_LOG
-        // 诊断：JUCE 对"任何一次导航完成"都回调这里 —— 包括 WebView2 控制器创建时的初始
-        // about:blank 文档，以及我们自己的 goToURL 打断它时以 OPERATION_CANCELED 上报的
-        // 那一次（JUCE 把该错误码当作成功，照样回调）。所以这一行能直接看出 pageLoaded
-        // 是否在我们真正的 UI 页面之前就被置位了。
+        // 导航完成都会回调（含 about:blank），所以能看出 pageLoaded 是否被提前置位。
         logEq ("PAGE finished  url=" + url
                + (pageLoaded ? "  (pageLoaded already true)" : "  -> pageLoaded=true"));
 #else
@@ -274,9 +258,7 @@ void ToreiEQAudioProcessorEditor::ensureWebView()
 #endif
         pageLoaded = true;
 
-        // A freshly loaded page has empty curve buffers of its own, so whatever we
-        // think the UI already knows is worthless now: force a full curve re-push on
-        // the next tick. Same reasoning as the !isVisible() case in timerCallback().
+        // 新页面自己的曲线缓冲是空的：下一个 tick 必须整组重推。
         curvePushPending = true;
     };
     webView->setBounds(getLocalBounds());
@@ -359,11 +341,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     }
 
 #if TOREI_EQ_DEBUG_LOG
-    // --- 心跳（诊断，只在 TOREI_EQ_DEBUG_LOG=1 的构建里存在）------------------------
-    // 每 40 tick 一行，带实例短标识，两个实例的行不会混。**注意它证明不了什么"卡死"**：
-    // 实测冻结时两个实例的频谱都在继续变化，所以"心跳停了"只可能是进程被杀 —— 心跳的
-    // 真正用途是给出"每 tick 耗时 / 事件数 / 阶段计数"这几个量（§13.1 的成本模型就是
-    // 从它反推出来的）。占用率告警另见下面的 kSlowTickAlarmMs（那条是常开的）。
+    // 每 40 tick 一行：给出每 tick 耗时 / 事件数 / 阶段计数。
     if (++diagTick >= 40)
     {
         diagTick = 0;
@@ -373,8 +351,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         if (ov >= 0)
             pushMode = ov;
 
-        // 每 tick 耗时（上一次心跳窗口累计值）。avg 是"我们每 tick 占消息线程多少毫秒"，
-        // sum 是窗口内合计 —— 与窗口时长（约 1850 ms）一比就是我们的占用率。
+        // 每 tick 耗时的窗口统计：avg = 我们每 tick 占消息线程多少毫秒，sum = 窗口内合计。
         juce::String msInfo;
         if (tickMsCount > 0)
         {
@@ -419,13 +396,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     if (!webView || !pageLoaded)
         return;
 
-    // 推送节流 / 推送量实验，模式来自 pushMode（编译期默认 + 运行时覆盖文件）：
-    //   1 = 停掉"重"事件（两条频谱 + 5 条曲线），只留电平与监听这两条极小的事件；
-    //   2 = 轻量推送（频谱每 2 tick，并去掉重复的旧曲线事件）；
-    //   0 = 原样。
-    // 曲线不再按 tick 节流：曲线去重（见下面的曲线段）已经把"没变化时的重复推送"降为
-    // 零，比按 4 tick 抽样更好 —— 抽样只会把用户拖节点时的曲线更新额外延迟最多 4 个
-    // tick（约 200 ms），而那正是用户最需要曲线跟手的时候。
+    // 曲线不按 tick 节流：去重已让"没变化"时零推送，抽样反而拖累拖动跟手。
     const bool pushSpectrum = (pushMode == 0) || (pushMode == 2 && (pushTick & 1) == 0);
     const bool pushCurves   = (pushMode == 0) || (pushMode == 2);
     ++pushTick;
@@ -525,13 +496,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     // UI's own merge logic collapses them into a single line (acceptance §8.1).
     if (pushCurves)
     {
-        // --- 曲线去重（WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md）------------------
-        // 在此之前，每个 tick 都无条件重算 5 组 512 点曲线、构造 5 个 payload、发 5 个
-        // 事件 —— 而曲线只在用户改参数时才会变。UI 空闲时这就是 100% 的纯冗余工作，
-        // 两个实例同时可见时正好是灌爆 host 消息线程 / WebView2 IPC 的那部分流量。
-        //
-        // 现在：版本号没变就整段跳过（不重算、不构造、不发）。曲线一变（拖节点、
-        // 切类型/M/S 模式、bypass、增删频段、宿主采样率变化）版本号就会变，立刻照旧推。
+        // 版本号没变就整段跳过；一变就照旧推全部 5 条（含重复的旧曲线事件）。
         const juce::uint32 curveRev = processorRef.getEqEngine().getCurveRevision();
 
         const bool refreshDue = (++curveRefreshTick >= kCurveSafetyRefreshTicks);
@@ -540,8 +505,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
 
         if (! webView->isVisible())
         {
-            // emitEventIfBrowserIsVisible 此时是空操作（JUCE 的可见性门控），所以现在
-            // 算出来的曲线 UI 根本收不到。只标记"下次可见要整组重推"，绝不更新版本号。
+            // 不可见时 JUCE 不发事件，所以只标记待重推、不更新版本号。
             curvePushPending = true;
 #if TOREI_EQ_DEBUG_LOG
             diagEventsSkipped += 5;
@@ -568,7 +532,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         }
         else
         {
-            // 曲线的唯一输入没变：整组跳过。这是空闲时省下的全部工作。
+            // 曲线没变：整组跳过（空闲时省下的全部工作）。
 #if TOREI_EQ_DEBUG_LOG
             diagEventsSkipped += 5;
 #endif
@@ -611,8 +575,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
     ++stageDone;
 #endif
 
-    // --- 每 tick 耗时累计 + "慢 tick"告警 -------------------------------------------
-    // 总耗时**永远**统计（喂告警）；分阶段耗时只在诊断构建里统计（喂心跳行的分解）。
+    // 每 tick 耗时：总耗时永远统计，分阶段只在诊断构建里统计。
     {
         const juce::int64 tEnd = juce::Time::getHighResolutionTicks();
         const double total = TickTimer::ms (tickTimer.t0, tEnd);
@@ -628,8 +591,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
         tickMsCurve += TickTimer::ms (tickTimer.tPost,   tEnd);              // 曲线段 + 监听事件
 #endif
 
-        // 常开的唯一告警：只在"某次 tick 明显超时"时写一行（带节流）。这个 bug 的性质是
-        // 消息线程占用率，保留这条最小判据，复发时立刻能拿到"我们占了多少毫秒"。
+        // 某次 tick 明显超时就写一行，给"消息线程被占满"留个判据。
         if (kSlowTickAlarmMs > 0.0 && total >= kSlowTickAlarmMs)
         {
             const juce::uint32 now = juce::Time::getMillisecondCounter();
@@ -642,9 +604,7 @@ void ToreiEQAudioProcessorEditor::timerCallback()
                        + "  (threshold " + juce::String (kSlowTickAlarmMs, 1) + " ms)"
                        + "  push=" + juce::String (pushMode)
                        + "  webView=" + juce::String (webView != nullptr ? 1 : 0)
-                       + " pageLoaded=" + juce::String (pageLoaded ? 1 : 0)
-                       + "  -> 参见 WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §13.1"
-                       + " (成本 ≈ 0.09 ms/事件 + ≈4.5 µs/每个推送的数值)");
+                       + " pageLoaded=" + juce::String (pageLoaded ? 1 : 0));
             }
         }
     }
@@ -808,14 +768,7 @@ void ToreiEQAudioProcessorEditor::pushCurve (const char* eventName, EqEngine::Cu
 
     for (int i = 0; i < curvePoints; ++i)
     {
-        // NOTE: 0.01 dB, not 0.1 dB. The curve is drawn through g2y(g) = 0.5 - g/60, so
-        // 1 dB is H/60 px and a 0.1 dB quantum is H/600 px -- about 1.37 px on a ~820 px
-        // tall display. That is a WHOLE PIXEL of vertical banding per data step, and it is
-        // the real cause of the "staircase / sawtooth" curve (CURVE_STAIRSTEP_HANDOFF.md):
-        // a low-gain bell spans only a handful of 0.1 dB levels, so consecutive samples
-        // repeat, Catmull-Rom then has p0==p1==p2==p3 and produces LITERALLY flat runs --
-        // which is why whole columns came out byte-identical. 0.01 dB is ~0.14 px, i.e.
-        // sub-pixel and invisible, while keeping the JSON payload compact.
+        // 0.01 dB 量化：0.1 dB 在 g2y 映射下约等于 1.37 屏幕像素，会画出肉眼可见的台阶。
         curvePayload.add (juce::var ((double) std::round (curveScratch[i] * 100.0f) * 0.01f));
     }
 

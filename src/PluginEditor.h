@@ -98,7 +98,7 @@ private:
     bool curveLoggedOnce = false;
 
 #if TOREI_EQ_DEBUG_LOG
-    // --- Diagnostic-only state (MID_SIDE_HANDOFF.md §13; gated per §19) ------------
+    //------------
     // Everything below exists solely to feed the temporary diagnostics, so it is
     // compiled out of a normal build along with the passes that fill it.
     int  curveDiagTick   = 0;
@@ -111,9 +111,9 @@ private:
     int          pendingLanesBand = -1;          // band awaiting its post-change LANES log
     juce::uint32 pendingLanesAtMs = 0;
     juce::uint32 lastMsProbeMs    = 0;
-    juce::uint32 lastSoloLogMs    = 0;           // SOLO line throttle (§26)
+    juce::uint32 lastSoloLogMs    = 0;           // 
 
-    // `ENGINE after setParam` is deferred to the timer and throttled (§15.2). The flag
+    // 
     // stays set until it has been emitted, so one final line always lands once a drag
     // stops -- the settled state is never lost.
     bool         pendingEngineLog = false;
@@ -123,45 +123,24 @@ private:
 
     bool pageLoaded = false;
 
-    // --- 曲线推送去重（修复，非诊断；WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §10）---
-    // 曲线的唯一输入是频段参数 + 采样率，引擎把它们的变化汇总成一个版本号
-    // （EqEngine::getCurveRevision()）。版本号没变 = 曲线没变，于是整组 512 点曲线
-    // 既不重算也不重推。这是 40 Hz 定时器里最贵的一段，也是两个实例同时可见时灌进
-    // WebView2 IPC 的主要流量 —— 而冻结恰恰发生在 UI 空闲、无人操作的时候，
-    // 也就是"每个 tick 都在重推 5 条一模一样的曲线"的时候。
-    //
-    // 不变量：只有事件确实发出去之后，才把版本号记成"已推送"。JUCE 的
-    // emitEventIfBrowserIsVisible 在组件不可见时一个字节都不发，若此时就记成已推送，
-    // 窗口重新可见后 UI 会永远停在旧曲线上。
+    // 曲线去重：版本号没变就整组跳过；只有事件真发出去了才记"已推送"。
     juce::uint32      lastCurveRevision = 0;
     std::atomic<bool> curvePushPending  { true };   // 下一个可见 tick 必须整组重推
     int               curveRefreshTick  = 0;        // 安全刷新计时（漏 bump 的兜底）
 
-    // 推送模式（诊断实验的开关，但门控逻辑本身是产品的一部分）：
-    //   0 = 全推（默认）  1 = 只推电平/监听  2 = 频谱半速
-    // 编译期默认值在 EqConfig.h；运行时用 push_mode.txt 覆盖的那条路径**只在诊断构建
-    // （TOREI_EQ_DEBUG_LOG=1）里编译**，产品构建永远用编译期默认值。
+    // 推送模式：0 全推 / 1 只推电平监听 / 2 频谱半速（push_mode.txt 覆盖仅诊断构建）。
     int pushMode = TOREI_DIAG_PUSH_MODE;
     int pushTick = 0;                     // pushMode==2 的频谱节流计数
 
-    // --- "慢 tick"告警（唯一常开的诊断测量）-----------------------------------------
-    // 这个 bug 的性质是"消息线程占用率"，把可观测性整段删掉的话，下次复发又只能靠猜。
-    // 所以保留一个极轻的常开判据：只有某次 tick 超过阈值才写一行（带节流）。
-    // 健康运行时几乎永不触发；触发时给出的正是"我们占了多少毫秒"这个关键量。
-    // 关掉它只需把 PluginEditor.cpp 里的 kSlowTickAlarmMs 设为 0。
+    // 慢 tick 告警：某次 tick 超过 kSlowTickAlarmMs 才写一行（节流 5s）。设为 0 即关闭。
     juce::uint32 lastSlowTickLogMs = 0;
 
 #if TOREI_EQ_DEBUG_LOG
-    // --- 以下全是诊断（默认编译掉；WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md §13.5）--
-    //   uiBootSeen       —— 页面自己的启动探针（UI_Log "ui-boot"）是否已收到。它比
-    //                       "导航完成"更可靠；监听器可能在 WebView2 回调线程上跑，故用 atomic。
-    //   firstPushLogged  —— 闸门第一次放行推送时打一行（一次性）。
-    //   diagTick/阶段计数 —— 喂 TICK 心跳行；成员而非函数内 static，否则两个实例互相污染。
-    //   tickMsTotal/...  —— 心跳窗口（40 tick）内的耗时统计与分阶段分解。
-    std::atomic<bool> uiBootSeen { false };
+    // 以下全是诊断，默认编译掉。
+    std::atomic<bool> uiBootSeen { false };   // 页面 ui-boot 探针（可能在 WebView2 线程回调）
     bool firstPushLogged = false;
 
-    double tickMsTotal = 0.0;
+    double tickMsTotal = 0.0;   // 心跳窗口（40 tick）内的耗时统计与分阶段分解
     double tickMsMax   = 0.0;
     int    tickMsCount = 0;
 
@@ -173,8 +152,7 @@ private:
     int stageListen   = 0;
     int stageDone     = 0;
 
-    // 上次心跳以来真正发出去的事件数 / 被去重跳过的事件数（写在 TICK 行里，
-    // 是"曲线去重是否生效"的当场验收指标）。
+    // 上次心跳以来真正发出 / 被去重跳过的事件数（写进 TICK 行，用来验收去重是否生效）。
     int diagEventsSent    = 0;
     int diagEventsSkipped = 0;
 

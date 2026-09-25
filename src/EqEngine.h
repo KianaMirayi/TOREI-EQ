@@ -104,7 +104,7 @@ public:
     // --- Listen / hold-to-listen (message thread sets, audio thread reads) ---
     // `-1` = no listen; otherwise the slot of the single listened band.
     //
-    // v2 semantics (Pro-Q "solo", see LISTEN_FEATURE_HANDOFF.md §0.10): while
+    // 
     // listening you hear the frequency CONTENT around that band (a bandpass of the
     // dry signal), and NONE of the EQ gain -- not even the listened band's own
     // gain. So every band ramps to transparent and a dedicated solo bandpass is
@@ -137,11 +137,11 @@ public:
 
     static Type typeFromString (const juce::String& s);
 
-    // --- M/S runtime probe (MID_SIDE_HANDOFF.md §13) ---
+    //
     // Compiled ONLY when TOREI_EQ_DEBUG_LOG is 1 (see EqConfig.h). It exists purely to
     // produce numeric evidence for the M/S verification round, which is now complete
     // (§18), so in a normal build this API and ALL of its supporting state compile away
-    // -- no probe passes, no atomics, no log traffic (§19).
+    // -- no probe passes, no atomics,
 #if TOREI_EQ_DEBUG_LOG
     enum ProbeChannel { probeL = 0, probeR, probeM, probeS };
 
@@ -169,14 +169,12 @@ public:
     // Channel mode of one band (modeStereo when the slot is empty/out of range).
     Mode getBandMode (int index) const;
 
-    // --- Solo-stage probe (MID_SIDE_HANDOFF.md §26) ---
-    // The solo stage has its OWN routing ramps (`soloWeight`), so the main-chain LANES
-    // log says nothing about what the audition is actually built from. These expose the
-    // CONVERGED ramp values plus the audition's output level and L/R correlation.
+    // 
+    // 
     //
     // The published values come from atomics filled by the audio thread, NOT from
     // SmoothedValue::getCurrentValue() -- reading that from the message thread would be
-    // a data race (§13.2).
+    // 
     float getSoloWeight (int lane) const;
     float getSoloOutDb (bool right) const;   // dBFS RMS of the solo stage output
     float getSoloOutCorr() const;            // L/R correlation: mid ~ +1, side ~ -1
@@ -204,24 +202,12 @@ public:
     // Returns true if any occupied band is boosting/cutting by at least 1 dB.
     bool hasNonUnityBand() const;
 
-    // --- Curve dirty-signal (WEBVIEW2_MULTI_INSTANCE_FREEZE_HANDOFF.md) ---
-    // Monotonic revision of every input the UI response curve depends on: the per-band
-    // parameters (type/freq/gain/q/slope/mode/bypass/occupied) and the sample rate.
-    // getCurveGains() reads the PUBLISHED coefficient objects, so anything that rebuilds
-    // them -- or that adds / removes / bypasses / re-routes a band -- bumps this.
-    //
-    // The editor compares it against the revision it last pushed and skips the whole
-    // 5 x 512-point recompute + 5 x 512-value payload + 5 IPC events when nothing
-    // changed. That idle path is the dominant cost of the 40 Hz UI timer, and with two
-    // editor windows open it was the bulk of the traffic on the host's message thread.
-    //
-    // Deliberately coarse and fail-safe: a redundant bump only costs one extra push,
-    // whereas a missed one would leave the curve stale -- so every band mutator bumps it
-    // unconditionally (even for parameters that happen not to change the curve), and the
-    // editor additionally re-pushes on a slow safety timer as a second net.
+    // --- Curve dirty-signal ---
+    // Bumped by every band mutator; the editor skips the 5x512 recompute + 5 pushes when it
+    // is unchanged. Coarse on purpose: a redundant bump costs one push, a missed one is stale.
     juce::uint32 getCurveRevision() const { return curveRevision.load (std::memory_order_relaxed); }
 
-    // Temporary diagnostic (Phase 1): one-line description of the active bands,
+    // 
     // including the first active band's b0 coefficient and its magnitude response
     // at its own centre frequency (in dB). Confirm the coefficients are non-unity.
     juce::String describe() const;
@@ -291,7 +277,7 @@ private:
     std::array<std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, kNumLanes>, kMaxBands> bandMix;
 
 #if TOREI_EQ_DEBUG_LOG
-    // Probe state, written by the audio thread and read by the message thread (§13).
+    // 
     // Plain atomics: the audio thread only stores, never allocates or locks.
     std::array<std::array<std::atomic<float>, kNumLanes>, kMaxBands> laneMix;
     std::atomic<float> probeInL  { -120.0f };
@@ -311,7 +297,7 @@ private:
     std::atomic<int>   soloProbeN  { 0 };      // samples accumulated (0 = no data)
 #endif
 
-    // --- Solo audition stage (Pro-Q "solo", §0.10) ---
+    // 
     // Bandpass coefficients for the listened band, rebuilt on the message thread
     // whenever the listen target or its freq/Q changes. Published by pointer swap,
     // and snapshotted (reference held) on the audio thread just like `coeffs`.
