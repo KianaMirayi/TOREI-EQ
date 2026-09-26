@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(TOREI-EQ VERSION 1.0.0)
+project(TOREI-EQ VERSION 1.0.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,7 +12,7 @@ juce_add_plugin(TOREI-EQ
     COMPANY_NAME              "TOREI"
     PLUGIN_NAME               "TOREI-EQ"
     PRODUCT_NAME              "TOREI-EQ"
-    VERSION                   "1.0.0"
+    VERSION                   "1.0.1"
     FORMATS                   VST3 Standalone
     PLUGIN_MANUFACTURER_CODE  Tore
     PLUGIN_CODE               Eq00
