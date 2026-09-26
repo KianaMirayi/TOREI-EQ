@@ -424,7 +424,7 @@ function BandPanel(p){var b=p.band,store=p.store,dims=p.dims,offset=p.offset,set
   );
 }
 
-function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
+function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef(),lowCnv=useRef();
   var dims,setDims;var _d=useState({w:0,h:0});dims=_d[0];setDims=_d[1];
   var _h=useState(null);var hoverId=_h[0],setHoverId=_h[1];
   var _t=useState(null);var tip=_t[0],setTip=_t[1];
@@ -480,12 +480,22 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // 所以：依赖里只留 [dims]，状态一律经 ref 取最新值。
   var storeRefLive=useRef(store);storeRefLive.current=store;
   var drawListenRef=useRef(null);drawListenRef.current=listenId;
+  // 拖动时降 SS、松手恢复：大面积频谱填充的成本 ∝ 像素（SS=3 时约 9.4ms，SS=1 约 1ms）。
+  // 描边宽度随 SS 放大（见下面的 _lw），否则细线会出现逐列覆盖率波动。
+  var _ssv=useState(3);var ssDrag=_ssv[0],setSsDrag=_ssv[1];
   useEffect(function(){if(dims.w<80)return;
-  var SS=3,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
+  var SS=ssDrag,ctx=cnv.current.getContext("2d"),dpr=(window.devicePixelRatio||1)*SS;cnv.current.width=dims.w*dpr;cnv.current.height=dims.h*dpr;ctx.scale(dpr,dpr);
+  var _lw=(SS>=3)?1:1.3;   // 描边宽度补偿（§8.2 的宽度表：SS=3 → 4.6/2.6/1.2，SS=1 → 6.0/3.4/1.6）
+  // 低分辨率层：只画两块大面积半透明频谱填充（成本 ∝ 像素；软边图形 SS=1 与 SS=3 无差别），
+  // 描边、网格、曲线仍在 SS=3 的主画布上。
+  var lowCtx=lowCnv.current.getContext("2d"),dprL=(window.devicePixelRatio||1);
+  lowCnv.current.width=dims.w*dprL;lowCnv.current.height=dims.h*dprL;lowCtx.setTransform(dprL,0,0,dprL,0,0);
   
   ctx.lineJoin="round";ctx.lineCap="round";
-  // 帧率预算：交互中不限帧，非交互 30fps，只有多实例时没人管的窗口才降到 15~20fps。
-  var INTERACT_MS=500,FPS_ACTIVE=30,BACKGROUND_AFTER_MS=15000,FPS_BG_MIN=15;
+  // 帧率预算：交互中 60fps，非交互 30fps，只有多实例时没人管的窗口才降到 15~20fps。
+  // 交互档曾经是"不限帧"：在 180Hz 屏上它会把同一帧重画 3 遍（曲线数据源只有 40Hz），
+  // 而每帧光栅成本是 13ms 量级 —— 拖动时正是它把合成器压垮。60fps 已高于数据源 40Hz。
+  var INTERACT_MS=500,FPS_ACTIVE=60,BACKGROUND_AFTER_MS=15000,FPS_BG_MIN=15,FPS_INTERACT=60;
   // 实例数靠 localStorage 心跳发现（键名与剪贴板不同）；背景档 = 3 个→20fps、≥4 个→15fps。
   var instKey="torei_eq_inst_ping",instId=Math.random().toString(36).slice(2);
   var pingInstances=function(){
@@ -529,6 +539,8 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
       " cnvPx="+(el?el.width+"x"+el.height:"-"))}catch(e){logDraw("geom-err:"+e.message)}};
   logGeom(); setTimeout(logGeom,1500); setTimeout(logGeom,4000);
   var _drawN=0,_rafN=0,_fpsWinT=performance.now(),_lastFpsKey="";
+  // 绘制节奏探针（每 1.5 秒一行，见 draw 末尾）：js = 主线程记账均值，iv* = 实际绘制间隔。
+  var _costN=0,_costSum=0,_costLogT=performance.now(),_prevDrawT=-1,_ivN=0,_ivSum=0,_ivMax=0;
   var rid,draw=function(){
   rid=requestAnimationFrame(draw);
   var _tNow=performance.now();
@@ -545,13 +557,17 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   var _interacting=(_tNow-lastAttentionT)<INTERACT_MS;
   var _bg=fpsBackgroundFor(_instCount);
   var _attended=focusedFlag||(_tNow-lastAttentionT)<BACKGROUND_AFTER_MS;
-  var _minInterval=_interacting?0:(1000/(_attended?FPS_ACTIVE:_bg));
+  // 交互中封顶 60fps（数据源 40Hz），而不是"不限帧"：见上面常量处的说明。
+  // 留 2ms 容差：rAF 是 180Hz 的 5.55ms 网格，严格的 16.67ms 阈值会让"第 3 帧"时过时不过，
+  // 实测只有 ~51fps 且间隔在 16.7/22.2ms 之间跳。减掉容差后稳定落在 60fps。
+  var _capFps=_interacting?FPS_INTERACT:(_attended?FPS_ACTIVE:_bg);
+  var _minInterval=1000/_capFps-2;
   if(_tNow-lastDrawT<_minInterval)return;
   // 取最新状态：本 effect 的依赖里已没有 store/listenId（见上），直接用闭包里的会读到旧值。
   var store=storeRefLive.current,listenId=drawListenRef.current,W=dims.w,H=dims.h,b=store.B,i;
   // 变化检测：抽样求和比对数据 + store 引用（曲线要抽 EQCURVE_* 源数组，CV_* 是算出来的）。
-  var _sig=0,_j;
-  for(_j=0;_j<SP_LEN;_j+=16)_sig+=SP[_j]*1.7;
+  var _sig=0,_j,_specHi=-120;
+  for(_j=0;_j<SP_LEN;_j+=16){_sig+=SP[_j]*1.7;if(SP[_j]>_specHi)_specHi=SP[_j]}
   for(_j=0;_j<IPS_LEN;_j+=16)_sig-=IPS[_j]*1.3;
   for(_j=0;_j<EQCURVE_LEN;_j+=16)_sig+=EQCURVE[_j]*.9;
   for(_j=0;_j<EQCURVE_LEN_S;_j+=8)_sig+=EQCURVE_S[_j]*.3;
@@ -568,7 +584,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     _drawN=0;_rafN=0;_fpsWinT=_tNow;
     var _key=_fps+"/"+_raf;
     if(_key!==_lastFpsKey){_lastFpsKey=_key;
-      logDraw("draw fps="+_fps+" raf="+_raf+" focus="+(focusedFlag?1:0)+" idleMs="+Math.round(_tNow-lastAttentionT)+" inst="+_instCount+" cap="+(_interacting?"none":(_attended?FPS_ACTIVE:_bg))+" ss="+SS)}
+      logDraw("draw fps="+_fps+" raf="+_raf+" focus="+(focusedFlag?1:0)+" idleMs="+Math.round(_tNow-lastAttentionT)+" inst="+_instCount+" cap="+_capFps+" ss="+SS)}
   }
   ctx.clearRect(0,0,W,H);
 
@@ -588,6 +604,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     ctx.lineWidth=1}
   // 频谱纵轴 = 0dBFS 顶 / -96dBFS 底（线性），宽量程让音乐的 -25~-65dB 频谱落在中上部，而非贴底
   var sp2y=function(d){return Math.max(-96,Math.min(0,d))/(-96)};
+  var syD=function(v){return sp2y(v)*H};   // 频谱数据 → 画布 y（刻度文字另走 sp2y）
   var SPT=SPTC;
   for(i=0;i<SPT.length;i++){var sd=SPT[i],sy=sp2y(sd)*H;
     if(sd===0){ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W-34,sy);ctx.strokeStyle="rgba(234,179,8,.5)";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1}
@@ -596,29 +613,30 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   // 频谱：DSP 已输出 SP_LEN(=256) 个对数频率、已平滑的点，UI 直接绘制（二次贝塞尔柔化），不再采样/平滑
   var SPW=W-34;
   var sx=function(i){return ((i+0.5)/Math.max(1,SP_LEN))*W};
-  var sy=function(v){return sp2y(v)*H};
-  // preEQ（输入）频谱：冷色灰蓝半透明（背景参考）
+  var sy=function(v){return syD(v)};
+  // preEQ（输入）频谱：冷色灰蓝半透明（背景参考）—— 填充画在低分辨率层
+  lowCtx.clearRect(0,0,W,H);
   if(IPS_LEN>1){
     var isx=function(i){return ((i+0.5)/Math.max(1,IPS_LEN))*W};
-    ctx.fillStyle="rgba(148,163,184,.10)";
-    ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,sp2y(IPS[0])*H);
-    for(i=0;i<IPS_LEN-1;i++){var ix=isx(i),inx=isx(i+1),iy=sp2y(IPS[i])*H,iny=sp2y(IPS[i+1])*H;ctx.quadraticCurveTo(ix,iy,(ix+inx)/2,(iy+iny)/2)}
-    ctx.lineTo(W,sp2y(IPS[IPS_LEN-1])*H);ctx.lineTo(W,H);ctx.closePath();ctx.fill();
+    lowCtx.fillStyle="rgba(148,163,184,.10)";
+    lowCtx.beginPath();lowCtx.moveTo(0,H);lowCtx.lineTo(0,syD(IPS[0]));
+    for(i=0;i<IPS_LEN-1;i++){var ix=isx(i),inx=isx(i+1),iy=syD(IPS[i]),iny=syD(IPS[i+1]);lowCtx.quadraticCurveTo(ix,iy,(ix+inx)/2,(iy+iny)/2)}
+    lowCtx.lineTo(W,syD(IPS[IPS_LEN-1]));lowCtx.lineTo(W,H);lowCtx.closePath();lowCtx.fill();
     ctx.strokeStyle="rgba(148,163,184,.28)";ctx.lineWidth=1;
-    ctx.beginPath();ctx.moveTo(0,sp2y(IPS[0])*H);
-    for(i=0;i<IPS_LEN-1;i++){var ix2=isx(i),inx2=isx(i+1),iy2=sp2y(IPS[i])*H,iny2=sp2y(IPS[i+1])*H;ctx.quadraticCurveTo(ix2,iy2,(ix2+inx2)/2,(iy2+iny2)/2)}
-    ctx.lineTo(W,sp2y(IPS[IPS_LEN-1])*H);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,syD(IPS[0]));
+    for(i=0;i<IPS_LEN-1;i++){var ix2=isx(i),inx2=isx(i+1),iy2=syD(IPS[i]),iny2=syD(IPS[i+1]);ctx.quadraticCurveTo(ix2,iy2,(ix2+inx2)/2,(iy2+iny2)/2)}
+    ctx.lineTo(W,syD(IPS[IPS_LEN-1]));ctx.stroke();
   }
-  // 填充（底部闭合）
-  ctx.fillStyle="rgba(255,229,185,.13)";
-  ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,sy(SP[0]));
-  for(i=0;i<SP_LEN-1;i++){var x=sx(i),nx=sx(i+1),y=sy(SP[i]),ny=sy(SP[i+1]);ctx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}
-  ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.lineTo(W,H);ctx.closePath();ctx.fill();
+  // 填充（底部闭合，同样画在低分辨率层）
+  lowCtx.fillStyle="rgba(255,229,185,.13)";
+  lowCtx.beginPath();lowCtx.moveTo(0,H);lowCtx.lineTo(0,sy(SP[0]));
+  for(i=0;i<SP_LEN-1;i++){var x=sx(i),nx=sx(i+1),y=syD(SP[i]),ny=syD(SP[i+1]);lowCtx.quadraticCurveTo(x,y,(x+nx)/2,(y+ny)/2)}
+  lowCtx.lineTo(W,syD(SP[SP_LEN-1]));lowCtx.lineTo(W,H);lowCtx.closePath();lowCtx.fill();
   // 顶部描边
   ctx.strokeStyle="rgba(255,229,185,.38)";ctx.lineWidth=1.5;
-  ctx.beginPath();ctx.moveTo(0,sy(SP[0]));
-  for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=sy(SP[i]),ny2=sy(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
-  ctx.lineTo(W,sy(SP[SP_LEN-1]));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(0,syD(SP[0]));
+  for(i=0;i<SP_LEN-1;i++){var x2=sx(i),nx2=sx(i+1),y2=syD(SP[i]),ny2=syD(SP[i+1]);ctx.quadraticCurveTo(x2,y2,(x2+nx2)/2,(y2+ny2)/2)}
+  ctx.lineTo(W,syD(SP[SP_LEN-1]));ctx.stroke();
   // 4 条曲线同时显示（Pro-Q 行为）：L 橙 / R 紫 / Mid 绿 / Side 蓝
   if(EQCURVE_LEN>0)applyEqCurve(W);else if(CURVE_DIRTY)mockCurve(b,W);
   smoothCurve(CV_M,W);smoothCurve(CV_S,W);smoothCurve(CV_L,W);smoothCurve(CV_R,W);
@@ -661,18 +679,18 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     // 三层描边：宽极淡外层 + 中亮中层 + 细亮芯。外层让线边缘成为渐变过渡。
     // SS=3 提供了充足的亚像素余量，所以亮芯可以细到 1.2px 而不会出现覆盖率波动
     // （实测各线宽的覆盖率抖动都只有 0.4% 左右；细线的边缘梯度反而更低）。
-    ctx.globalAlpha=.13;ctx.lineWidth=4.6;ctx.strokeStyle="rgba(234,179,8,1)";trace(CV_M);
-    ctx.globalAlpha=.30;ctx.lineWidth=2.6;ctx.strokeStyle="rgba(255,229,185,1)";trace(CV_M);
-    ctx.globalAlpha=1;ctx.lineWidth=1.2;ctx.strokeStyle="rgba(255,240,215,.98)";trace(CV_M);
+    ctx.globalAlpha=.13;ctx.lineWidth=4.6*_lw;ctx.strokeStyle="rgba(234,179,8,1)";trace(CV_M);
+    ctx.globalAlpha=.30;ctx.lineWidth=2.6*_lw;ctx.strokeStyle="rgba(255,229,185,1)";trace(CV_M);
+    ctx.globalAlpha=1;ctx.lineWidth=1.2*_lw;ctx.strokeStyle="rgba(255,240,215,.98)";trace(CV_M);
   }else{
     // 多通道：最多四条同时显示（Pro-Q 行为）。选中节点所在的组更亮，另一组淡化但仍可见。
     var fMS=1,fLR=1;
     if(selB2){if(selB2.mode==="mid"||selB2.mode==="side")fLR=.3;else if(selB2.mode==="L"||selB2.mode==="R")fMS=.3}
     var drawC=function(arr,col,f){if(f<=0)return;
       // 三层描边：宽极淡外层 + 中亮中层 + 细亮芯（与单曲线一致，见上方说明）
-      ctx.globalAlpha=f*.15;ctx.lineWidth=4.6;ctx.strokeStyle="rgb("+col+")";trace(arr);
-      ctx.globalAlpha=f*.32;ctx.lineWidth=2.6;ctx.strokeStyle="rgb("+col+")";trace(arr);
-      ctx.globalAlpha=f;ctx.lineWidth=1.2;ctx.strokeStyle="rgb("+col+")";trace(arr)};
+      ctx.globalAlpha=f*.15;ctx.lineWidth=4.6*_lw;ctx.strokeStyle="rgb("+col+")";trace(arr);
+      ctx.globalAlpha=f*.32;ctx.lineWidth=2.6*_lw;ctx.strokeStyle="rgb("+col+")";trace(arr);
+      ctx.globalAlpha=f;ctx.lineWidth=1.2*_lw;ctx.strokeStyle="rgb("+col+")";trace(arr)};
     if(msDiff){drawC(CV_S,"56,189,248",fMS);drawC(CV_M,"34,197,94",fMS)}
     if(lrDiff){drawC(CV_R,"168,85,247",fLR);drawC(CV_L,"249,115,22",fLR)}
     ctx.globalAlpha=1;
@@ -691,6 +709,21 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     if(lb){var lbw=.6/Math.max(.1,lb.q||1),lf1=lb.freq/Math.pow(2,lbw),lf2=lb.freq*Math.pow(2,lbw),lx1=Math.max(0,f2x(lf1)*W),lx2=Math.min(W,f2x(lf2)*W);
     ctx.fillStyle="rgba(4,5,7,.62)";ctx.fillRect(0,0,lx1,H);ctx.fillRect(lx2,0,W-lx2,H);
     ctx.strokeStyle="rgba("+BC[li%8]+",.95)";ctx.lineWidth=1.5;ctx.shadowColor="rgba("+BC[li%8]+",.8)";ctx.shadowBlur=8;ctx.beginPath();ctx.moveTo(lx1,0);ctx.lineTo(lx1,H);ctx.moveTo(lx2,0);ctx.lineTo(lx2,H);ctx.stroke();ctx.shadowBlur=0}}
+  // —— 单帧成本 / 绘制节奏探针 ——
+  // 【故意不做 getImageData flush】：在 GPU 加速的 canvas 上 readback 会把 Chromium 踢到
+  // 慢路径，实测一次 flush(29ms) 之后帧率从 180fps 掉到 ~3fps 且不恢复 —— 代价远超收益。
+  // 改为记录"实际绘制间隔"：理论上限 = 1000/cap；实测 ivAvg/ivMax 明显大于它时，说明光栅/
+  // 合成已经跟不上（这才是有波形时卡顿的真信号）。js 一列是主线程记账耗时，不含光栅。
+  var _tcE=performance.now(),_iv=(_prevDrawT>0)?(_tNow-_prevDrawT):-1;
+  _prevDrawT=_tNow;
+  _costN++;_costSum+=_tcE-_tNow;
+  if(_iv>=0){_ivN++;_ivSum+=_iv;if(_iv>_ivMax)_ivMax=_iv}
+  if(_tcE-_costLogT>1500){
+    var _cn=Math.max(1,_costN),_in=Math.max(1,_ivN),_js=_costSum/_cn,_iav=_ivSum/_in;
+    window.__drawCost={jsMs:Math.round(_js*100)/100,ivAvg:Math.round(_iav*100)/100,ivMax:Math.round(_ivMax*100)/100,frames:_costN,spectrum:Math.round(_specHi*10)/10,cap:_capFps,ss:SS,w:W,h:H};
+    logDraw("drawcost js="+_js.toFixed(2)+"ms ivAvg="+_iav.toFixed(2)+"ms ivMax="+_ivMax.toFixed(2)+"ms n="+_costN+" specMax="+_specHi.toFixed(1)+" cap="+_capFps+" ss="+SS+" cw="+cnv.current.width);
+    _costN=0;_costSum=0;_ivN=0;_ivSum=0;_ivMax=0;_costLogT=_tcE;
+  }
   };rid=requestAnimationFrame(draw);
   return function(){cancelAnimationFrame(rid);
     window.removeEventListener("pointerdown",markAttention,true);
@@ -699,7 +732,7 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     window.removeEventListener("wheel",markAttention,true);
     window.removeEventListener("keydown",markAttention,true);
     window.removeEventListener("focus",onWinFocus);
-    window.removeEventListener("blur",onWinBlur)}},[dims]);
+    window.removeEventListener("blur",onWinBlur)}},[dims,ssDrag]);
   var hitTest=function(mx,my){for(var i=store.B.length-1;i>=0;i--){var b=store.B[i];if(!b.active||b.mute)continue;if(Math.hypot(mx-f2x(b.freq)*dims.w,my-g2y(b.gain)*dims.h)<14)return b}return null};
   var drag=useRef(null);
   // store 的最新引用。下面几个 window 级 effect 只订阅一次（deps=[]），靠 storeRef 取当前渲染
@@ -738,9 +771,13 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
     m("span",{style:{flex:1}},label),
     right?m("span",{style:{color:"#64748b",fontSize:10,letterSpacing:.3}},right):null)};
   var selN=store.selCount();
-  var onPD=function(e){if(e.button!==0)return;if(e.target&&e.target.closest&&e.target.closest(".eqctx"))return;e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1000);drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId)}else{store.setSel(null)}};
+  var onPD=function(e){if(e.button!==0)return;if(e.target&&e.target.closest&&e.target.closest(".eqctx"))return;e.stopPropagation();var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);if(t){store.setSel(t.id);setActiveId(t.id);showTip(t.id);fadeTip(1000);drag.current={id:t.id,sx:mx,sy:my,sf:t.freq,sg:t.gain,sq:t.q};e.target.setPointerCapture(e.pointerId);
+    // 拖动开始：降到 SS=1（填充成本 ∝ SS²，见上面 ssDrag 的说明）
+    setSsDrag(1)}else{store.setSel(null)}};
   var onPM=function(e){var d=drag.current;if(!d){if(e.target&&e.target.closest&&e.target.closest(".eqov")){clearFade();setTipFade(false);return;}var r2=ctr.current.getBoundingClientRect(),mx2=e.clientX-r2.left,my2=e.clientY-r2.top,t2=hitTest(mx2,my2),nid=t2?t2.id:null;if(nid!==hoverId){setHoverId(nid);if(nid!==null){if(tipTimer.current){clearTimeout(tipTimer.current);tipTimer.current=null}tipTimer.current=setTimeout(function(){showTip(nid)},120)}else{fadeTip(900)}}return}var r=ctr.current.getBoundingClientRect(),dx=e.clientX-r.left-d.sx,dy=e.clientY-r.top-d.sy,mul=e.ctrlKey?.1:1;if(e.altKey){var q=Math.max(.1,Math.min(40,d.sq-dy*.1*mul));store.update(d.id,{q:+q.toFixed(2)})}else{var g=Math.max(-30,Math.min(30,d.sg-dy/dims.h*60*mul)),f=Math.round(x2f(f2x(d.sf)+dx/dims.w*mul));store.update(d.id,{gain:+g.toFixed(1),freq:f})}};
-  var onPU=function(){drag.current=null;setActiveId(null)};
+  var onPU=function(){drag.current=null;setActiveId(null);
+    // 松手恢复 SS=3（延后一点，避免手还在动时立刻重分配后备存储）
+    setTimeout(function(){if(!drag.current)setSsDrag(3)},350)};
   var onPL=function(){setHoverId(null);fadeTip(700)};
   var onWheel=function(e){var r=ctr.current.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,t=hitTest(mx,my);
     // While solo-listening, the band panel sits right beside the node and covers its
@@ -754,7 +791,8 @@ function EQCanvas(p){var store=p.store;var ctr=useRef(),cnv=useRef();
   if(showTipId!==null)for(i2=0;i2<store.B.length;i2++)if(store.B[i2].id===showTipId){tipB=store.B[i2];tipIdx=i2}
   return m("div",{style:{flex:"1 1 0%",display:"flex",flexDirection:"row",minHeight:0,background:"#0b0c10"}},
     m("div",{ref:ctr,style:{flex:1,position:"relative",minWidth:0},onPointerDown:onPD,onPointerMove:onPM,onPointerUp:onPU,onPointerLeave:onPL,onDoubleClick:onDC,onContextMenu:onCM,onWheel:onWheel},
-      m("canvas",{ref:cnv,style:{width:"100%",height:"100%",display:"block"}}),
+      m("canvas",{ref:lowCnv,style:{position:"absolute",left:0,top:0,width:"100%",height:"100%",display:"block",zIndex:0}}),
+      m("canvas",{ref:cnv,style:{position:"relative",width:"100%",height:"100%",display:"block",zIndex:1}}),
       tipB?m(BandTip,{band:tipB,idx:tipIdx,store:store,x:f2x(tipB.freq)*dims.w,y:g2y(tipB.gain)*dims.h,W:dims.w,listenId:listenId,setListenId:function(id){listenByPtrRef.current=(id!==null);applyListen(id)},fade:tipFade}):null,
       store.selB?m(BandPanel,{band:store.selB,store:store,dims:dims,offset:p.panelOffsets[store.selB.id]||0,setOffset:function(x){p.setPanelOffset(store.selB.id,x)}}):null,
       ctxMenu?m("div",{className:"eqctx tdropanim",onPointerDown:stopE,style:{position:"absolute",left:Math.max(4,Math.min(ctxMenu.x,dims.w-200)),top:Math.max(4,Math.min(ctxMenu.y,dims.h-152)),zIndex:40,width:196,background:"#252830",border:"1px solid rgba(148,163,184,.28)",borderRadius:10,boxShadow:"0 18px 36px rgba(0,0,0,.65)",padding:5,fontSize:12,color:"#e2e8f0"}},
